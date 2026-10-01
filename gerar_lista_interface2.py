@@ -14,7 +14,7 @@ import pdfplumber
 
 # --- ATIVAÇÃO DE ALTA RESOLUÇÃO (DPI AWARENESS) ---
 try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-monitor DPI aware
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
     try:
         ctypes.windll.user32.SetProcessDPIAware()
@@ -65,35 +65,19 @@ def formatar_titulo_turma(curso, seriacao, letra_turma):
         return f"{seriacao} - Turma {letra_turma}"
 
 
-def calcular_larguras_colunas(alunos, colunas_extras, largura_total_cm=18.0):
-    """Calcula responsivamente a largura de cada coluna para caber na página A4."""
-    if not alunos:
-        max_len_num = 3
+def calcular_larguras_colunas(colunas_extras, largura_total_cm=18.0):
+    """Retorna as larguras originais padrão para as colunas da tabela."""
+    w_num = 1.0   # Largura original N.º
+    w_nome = 11.0 # Largura Nome do Estudante
+
+    qtd_extras = len(colunas_extras)
+    if qtd_extras > 0:
+        espaco_restante = largura_total_cm - (w_num + w_nome)
+        w_col_extra = max(1.5, espaco_restante / qtd_extras)
+        w_extras = [w_col_extra] * qtd_extras
     else:
-        max_len_num = max(len(str(num)) for num in alunos.keys())
-
-    # 1. Largura responsiva para "N.º"
-    w_num = max(1.2, min(2.0, (max_len_num * 0.35) + 0.6))
-
-    # 2. Larguras para colunas extras (com base no título e situação)
-    w_extras = []
-    for col_titulo in colunas_extras:
-        len_tit = max(len(col_titulo), len("Transferido"), len("Remanejado"))
-        w_col = max(2.5, min(5.0, (len_tit * 0.18) + 1.0))
-        w_extras.append(w_col)
-
-    soma_extras = sum(w_extras)
-
-    # 3. Largura responsiva para "Nome do Estudante" (ocupa todo o espaço restante)
-    w_nome = largura_total_cm - w_num - soma_extras
-
-    # Garantia de espaço mínimo para o nome do estudante caso haja muitas colunas
-    if w_nome < 5.0:
-        w_nome = 5.0
-        # Reduz proporcionalmente as colunas extras se ultrapassarem a página
-        espaco_para_extras = largura_total_cm - w_num - w_nome
-        if colunas_extras and espaco_para_extras > 0:
-            w_extras = [espaco_para_extras / len(colunas_extras)] * len(colunas_extras)
+        w_nome = largura_total_cm - w_num
+        w_extras = []
 
     larguras_finais = [Cm(w_num), Cm(w_nome)] + [Cm(w) for w in w_extras]
     return larguras_finais
@@ -253,7 +237,7 @@ def gerar_documento_word(
     log_callback=None,
     progress_callback=None,
 ):
-    """Gera o ficheiro Word formatado com larguras de colunas responsivas."""
+    """Gera o ficheiro Word mantendo a largura de coluna fixa."""
     if colunas_extras is None:
         colunas_extras = []
 
@@ -270,6 +254,7 @@ def gerar_documento_word(
     primeira_turma = True
     num_cols = 2 + len(colunas_extras)
     titulos = ["N.º", "Nome do Estudante"] + colunas_extras
+    larguras = calcular_larguras_colunas(colunas_extras, largura_total_cm=18.0)
 
     if log_callback:
         log_callback("Gerando tabelas no Word...")
@@ -297,18 +282,15 @@ def gerar_documento_word(
         run_t.font.size = Pt(14)
         run_t.font.name = "Arial"
 
-        # Cálculo responsivo da largura das colunas
-        larguras = calcular_larguras_colunas(
-            alunos, colunas_extras, largura_total_cm=18.0
-        )
-
         tabela = doc.add_table(rows=1, cols=num_cols)
         tabela.style = "Table Grid"
         tabela.alignment = WD_TABLE_ALIGNMENT.CENTER
         tabela.autofit = False
 
-        hdr_cells = tabela.rows[0].cells
+        for i, col in enumerate(tabela.columns):
+            col.width = larguras[i]
 
+        hdr_cells = tabela.rows[0].cells
         for i, titulo in enumerate(titulos):
             hdr_cells[i].width = larguras[i]
             aplicar_cor_fundo_celula(hdr_cells[i], "2F4F4F")
@@ -339,6 +321,7 @@ def gerar_documento_word(
             situacao_str = aluno["situacao"].capitalize()
             is_especial = situacao_str in ["Transferido", "Remanejado"]
 
+            # Coluna 0: N.º
             formatar_paragrafo_celula(
                 row_cells[0].paragraphs[0],
                 str(num),
@@ -347,36 +330,62 @@ def gerar_documento_word(
                 font_size=12,
             )
 
-            p_nome = row_cells[1].paragraphs[0]
-            p_nome.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            p_nome.paragraph_format.space_before = Pt(2)
-            p_nome.paragraph_format.space_after = Pt(2)
-            p_nome.paragraph_format.line_spacing = 1.0
-
-            run_nome = p_nome.add_run(aluno["nome"])
-            run_nome.font.name = "Arial"
-            run_nome.font.size = Pt(12)
-
-            if len(colunas_extras) == 0 and is_especial:
-                run_trans = p_nome.add_run(f" - {situacao_str}")
-                run_trans.font.name = "Arial"
-                run_trans.font.size = Pt(12)
-                run_trans.bold = True
-
-            for col_idx in range(len(colunas_extras)):
-                cell_extra = row_cells[2 + col_idx]
-                texto_extra = situacao_str if (is_especial and col_idx == 0) else ""
+            if is_especial:
                 formatar_paragrafo_celula(
-                    cell_extra.paragraphs[0],
-                    texto_extra,
-                    WD_ALIGN_PARAGRAPH.CENTER,
+                    row_cells[1].paragraphs[0],
+                    aluno["nome"],
+                    WD_ALIGN_PARAGRAPH.LEFT,
                     bold=False,
                     font_size=12,
                 )
 
-            if is_especial:
+                if len(colunas_extras) >= 2:
+                    celula_mesclada_extras = row_cells[2].merge(row_cells[-1])
+                    celula_mesclada_extras.width = sum(larguras[2:])
+                    formatar_paragrafo_celula(
+                        celula_mesclada_extras.paragraphs[0],
+                        situacao_str,
+                        WD_ALIGN_PARAGRAPH.CENTER,
+                        bold=True,
+                        font_size=12,
+                    )
+                elif len(colunas_extras) == 1:
+                    formatar_paragrafo_celula(
+                        row_cells[2].paragraphs[0],
+                        situacao_str,
+                        WD_ALIGN_PARAGRAPH.CENTER,
+                        bold=True,
+                        font_size=12,
+                    )
+                else:
+                    formatar_paragrafo_celula(
+                        row_cells[1].paragraphs[0],
+                        f"{aluno['nome']} - {situacao_str}",
+                        WD_ALIGN_PARAGRAPH.LEFT,
+                        bold=False,
+                        font_size=12,
+                    )
+
                 for cell in row_cells:
                     aplicar_cor_fundo_celula(cell, "E0E0E0")
+            else:
+                formatar_paragrafo_celula(
+                    row_cells[1].paragraphs[0],
+                    aluno["nome"],
+                    WD_ALIGN_PARAGRAPH.LEFT,
+                    bold=False,
+                    font_size=12,
+                )
+
+                for col_idx in range(len(colunas_extras)):
+                    cell_extra = row_cells[2 + col_idx]
+                    formatar_paragrafo_celula(
+                        cell_extra.paragraphs[0],
+                        "",
+                        WD_ALIGN_PARAGRAPH.CENTER,
+                        bold=False,
+                        font_size=12,
+                    )
 
     doc.save(caminho_saida)
     if log_callback:
@@ -396,7 +405,7 @@ class SideTabWizardApp:
         self.root.minsize(1000, 620)
 
         # Dados da Aplicação
-        self.opcao_modo = tk.StringVar(value="1")  # "1": Novo, "2": Atualizar
+        self.opcao_modo = tk.StringVar(value="1")
         self.caminho_word = ""
         self.colunas_extras = []
         self.caminhos_pdfs = []
@@ -419,7 +428,6 @@ class SideTabWizardApp:
         self._atualizar_resumo()
 
     def _centralizar_janela(self, largura, altura):
-        """Calcula o centro da tela e ajusta a posição da janela."""
         self.root.update_idletasks()
         largura_tela = self.root.winfo_screenwidth()
         altura_tela = self.root.winfo_screenheight()
@@ -561,12 +569,12 @@ class SideTabWizardApp:
         )
         self.frames_passos[2] = f2
 
-        # Passo 3: Layout Tabela (Dramaticamente Atualizado com Adição/Remoção Dinâmica)
+        # Passo 3: Layout Tabela
         f3 = ttk.Frame(self.center_content)
         ttk.Label(f3, text="Passo 3: Layout da Tabela", style="Header.TLabel").pack(anchor=tk.W)
         ttk.Label(
             f3,
-            text="As colunas 'N.º' e 'Nome do Estudante' são fixas com larguras responsivas.\nAdicione ou remova colunas adicionais para a sua tabela abaixo:",
+            text="As colunas 'N.º' e 'Nome do Estudante' são fixas.\nAdicione ou remova colunas adicionais para a sua tabela abaixo:",
             style="SubHeader.TLabel",
         ).pack(anchor=tk.W, pady=(2, 15))
 
