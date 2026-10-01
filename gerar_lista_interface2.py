@@ -65,6 +65,49 @@ def formatar_titulo_turma(curso, seriacao, letra_turma):
         return f"{seriacao} - Turma {letra_turma}"
 
 
+def normalizar_turno(turno_raw):
+    """Padroniza o nome do turno para Manhã, Tarde, Noite, etc."""
+    if not turno_raw:
+        return "Não informado"
+    t = turno_raw.upper().strip()
+    if "MANH" in t or "MATUTIN" in t:
+        return "Manhã"
+    if "TARD" in t or "VESPERTIN" in t:
+        return "Tarde"
+    if "NOIT" in t or "NOTURN" in t:
+        return "Noite"
+    if "INTEGRAL" in t:
+        return "Integral"
+    return turno_raw.strip().capitalize()
+
+
+def formatar_nome_serie(seriacao):
+    """Extrai uma representação limpa da série (ex: '1º', '2º', 'Classe Especial D.I.')."""
+    match = re.search(r"(\d+[º°]?)", seriacao)
+    if match:
+        num_serie = match.group(1)
+        if not ("º" in num_serie or "°" in num_serie):
+            num_serie += "º"
+        return num_serie
+    return seriacao.strip()
+
+
+def formatar_nome_curto_turma(seriacao, letra_turma, turma_titulo):
+    """Gera um nome curto para a turma (ex: '1º A', '2º B', 'D.I. - Turma A')."""
+    match = re.search(r"(\d+[º°]?)", seriacao)
+    if match and letra_turma:
+        num_serie = match.group(1)
+        if not ("º" in num_serie or "°" in num_serie):
+            num_serie += "º"
+        return f"{num_serie} {letra_turma.strip()}"
+    return turma_titulo.strip()
+
+
+def chave_ordenacao_natural(texto):
+    """Chave para ordenação natural de strings com números (ex: 1º, 2º... 10º)."""
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r"(\d+)", str(texto))]
+
+
 def calcular_larguras_colunas(colunas_extras, largura_total_cm=18.0):
     """Retorna as larguras originais padrão para as colunas da tabela."""
     w_num = 1.0   # Largura original N.º
@@ -88,6 +131,11 @@ def extrair_dados_pdf(caminho_pdf, log_callback=None, progress_callback=None):
     turmas = {}
     turma_atual = None
     processar_turma_atual = False
+
+    curso_atual = ""
+    seriacao_atual = ""
+    turno_atual = ""
+    letra_atual = ""
 
     nome_arquivo = os.path.basename(caminho_pdf)
     if log_callback:
@@ -120,6 +168,7 @@ def extrair_dados_pdf(caminho_pdf, log_callback=None, progress_callback=None):
                     if match_turma:
                         curso = match_turma.group(1).strip()
                         seriacao = match_turma.group(2).strip()
+                        turno_raw = match_turma.group(3).strip() if match_turma.group(3) else ""
                         letra_turma = match_turma.group(4).strip()
 
                         curso_permitido = any(
@@ -131,6 +180,11 @@ def extrair_dados_pdf(caminho_pdf, log_callback=None, progress_callback=None):
                             turma_atual = formatar_titulo_turma(
                                 curso, seriacao, letra_turma
                             )
+                            curso_atual = curso
+                            seriacao_atual = seriacao
+                            turno_atual = normalizar_turno(turno_raw)
+                            letra_atual = letra_turma
+
                             if turma_atual not in turmas:
                                 turmas[turma_atual] = {}
                         else:
@@ -153,9 +207,102 @@ def extrair_dados_pdf(caminho_pdf, log_callback=None, progress_callback=None):
                         turmas[turma_atual][num_chamada] = {
                             "nome": nome_aluno,
                             "situacao": situacao,
+                            "turno": turno_atual,
+                            "seriacao": seriacao_atual,
+                            "letra_turma": letra_atual,
+                            "curso": curso_atual,
                         }
 
     return turmas
+
+
+def gerar_relatorio_totais(dados_consolidados):
+    """Calcula e formata os números totais de alunos matriculados."""
+    total_matriculados = 0
+    por_turno = {}
+    por_serie = {}
+    por_turma = {}
+
+    for turma_titulo, alunos in dados_consolidados.items():
+        count_turma_matriculados = 0
+        sample_aluno = None
+
+        for num, aluno in alunos.items():
+            situacao = aluno.get("situacao", "").strip().capitalize()
+            if situacao == "Matriculado":
+                if sample_aluno is None:
+                    sample_aluno = aluno
+
+                total_matriculados += 1
+                count_turma_matriculados += 1
+
+                turno = aluno.get("turno", "Não informado")
+                seriacao = aluno.get("seriacao", "Outros")
+
+                nome_serie = formatar_nome_serie(seriacao)
+
+                por_turno[turno] = por_turno.get(turno, 0) + 1
+                por_serie[nome_serie] = por_serie.get(nome_serie, 0) + 1
+
+        if not sample_aluno and alunos:
+            sample_aluno = next(iter(alunos.values()))
+
+        if sample_aluno:
+            seriacao = sample_aluno.get("seriacao", "")
+            letra_turma = sample_aluno.get("letra_turma", "")
+            turno_turma = sample_aluno.get("turno", "")
+
+            nome_curto_turma = formatar_nome_curto_turma(
+                seriacao, letra_turma, turma_titulo
+            )
+
+            if turno_turma and turno_turma != "Não informado":
+                rotulo_turma = f"{nome_curto_turma} ({turno_turma})"
+            else:
+                rotulo_turma = nome_curto_turma
+
+            por_turma[rotulo_turma] = count_turma_matriculados
+
+    # Construção do texto do relatório
+    linhas = []
+    linhas.append("=" * 65)
+    linhas.append("          RELATÓRIO DE TOTAIS DE ALUNOS MATRICULADOS")
+    linhas.append("=" * 65)
+    linhas.append("")
+    linhas.append(f"TOTAL GERAL DE MATRICULADOS: {total_matriculados} aluno(s)")
+    linhas.append("")
+    linhas.append("-" * 65)
+    linhas.append("TOTAL POR TURNO:")
+    linhas.append("-" * 65)
+    if por_turno:
+        for turno in sorted(por_turno.keys(), key=chave_ordenacao_natural):
+            linhas.append(f"  • {turno}: {por_turno[turno]} aluno(s)")
+    else:
+        linhas.append("  Nenhum aluno matriculado encontrado.")
+
+    linhas.append("")
+    linhas.append("-" * 65)
+    linhas.append("TOTAL POR SÉRIE:")
+    linhas.append("-" * 65)
+    if por_serie:
+        for serie in sorted(por_serie.keys(), key=chave_ordenacao_natural):
+            linhas.append(f"  • {serie}: {por_serie[serie]} aluno(s)")
+    else:
+        linhas.append("  Nenhum aluno matriculado encontrado.")
+
+    linhas.append("")
+    linhas.append("-" * 65)
+    linhas.append("TOTAL POR TURMA:")
+    linhas.append("-" * 65)
+    if por_turma:
+        for t_nome in sorted(por_turma.keys(), key=chave_ordenacao_natural):
+            linhas.append(f"  • {t_nome}: {por_turma[t_nome]} aluno(s)")
+    else:
+        linhas.append("  Nenhum aluno matriculado encontrado.")
+
+    linhas.append("=" * 65)
+
+    return "\n".join(linhas)
 
 
 def ler_dados_word_existente(caminho_word):
@@ -234,10 +381,11 @@ def gerar_documento_word(
     turmas_dados,
     caminho_saida,
     colunas_extras=None,
+    opcao_case="upper",
     log_callback=None,
     progress_callback=None,
 ):
-    """Gera o ficheiro Word mantendo a largura de coluna fixa."""
+    """Gera o ficheiro Word mantendo a largura de coluna fixa e aplicando o estilo da caixa do nome."""
     if colunas_extras is None:
         colunas_extras = []
 
@@ -321,6 +469,13 @@ def gerar_documento_word(
             situacao_str = aluno["situacao"].capitalize()
             is_especial = situacao_str in ["Transferido", "Remanejado"]
 
+            # Formatação do nome (Tudo maiúsculo ou Primeira Letra Maiúscula)
+            nome_formatado = aluno["nome"]
+            if opcao_case == "upper":
+                nome_formatado = nome_formatado.upper()
+            elif opcao_case == "title":
+                nome_formatado = nome_formatado.title()
+
             # Coluna 0: N.º
             formatar_paragrafo_celula(
                 row_cells[0].paragraphs[0],
@@ -333,7 +488,7 @@ def gerar_documento_word(
             if is_especial:
                 formatar_paragrafo_celula(
                     row_cells[1].paragraphs[0],
-                    aluno["nome"],
+                    nome_formatado,
                     WD_ALIGN_PARAGRAPH.LEFT,
                     bold=False,
                     font_size=12,
@@ -360,7 +515,7 @@ def gerar_documento_word(
                 else:
                     formatar_paragrafo_celula(
                         row_cells[1].paragraphs[0],
-                        f"{aluno['nome']} - {situacao_str}",
+                        f"{nome_formatado} - {situacao_str}",
                         WD_ALIGN_PARAGRAPH.LEFT,
                         bold=False,
                         font_size=12,
@@ -371,7 +526,7 @@ def gerar_documento_word(
             else:
                 formatar_paragrafo_celula(
                     row_cells[1].paragraphs[0],
-                    aluno["nome"],
+                    nome_formatado,
                     WD_ALIGN_PARAGRAPH.LEFT,
                     bold=False,
                     font_size=12,
@@ -401,11 +556,12 @@ class SideTabWizardApp:
         self.root = root
         self.root.title("Gerador de Listas de Alunos")
 
-        self._centralizar_janela(1150, 720)
-        self.root.minsize(1000, 620)
+        self._centralizar_janela(1150, 750)
+        self.root.minsize(1000, 650)
 
         # Dados da Aplicação
-        self.opcao_modo = tk.StringVar(value="1")
+        self.opcao_modo = tk.StringVar(value="1") # '1' = Novo Word, '2' = Atualizar Word, '3' = Totais
+        self.opcao_case = tk.StringVar(value="upper")  # 'upper' para AA ou 'title' para Aa
         self.caminho_word = ""
         self.colunas_extras = []
         self.caminhos_pdfs = []
@@ -502,6 +658,10 @@ class SideTabWizardApp:
         self.sum_val_word = ttk.Label(self.summary_right, text="Não selecionado", style="SummaryVal.TLabel")
         self.sum_val_word.pack(anchor=tk.W, padx=10, pady=(0, 10))
 
+        ttk.Label(self.summary_right, text="Caixa dos Nomes:", style="SummaryLabel.TLabel").pack(anchor=tk.W, padx=10)
+        self.sum_val_case = ttk.Label(self.summary_right, text="TUDO MAIÚSCULO (AA)", style="SummaryVal.TLabel")
+        self.sum_val_case.pack(anchor=tk.W, padx=10, pady=(0, 10))
+
         ttk.Label(self.summary_right, text="Layout Tabela:", style="SummaryLabel.TLabel").pack(anchor=tk.W, padx=10)
         self.sum_val_layout = ttk.Label(self.summary_right, text="-", style="SummaryVal.TLabel")
         self.sum_val_layout.pack(anchor=tk.W, padx=10, pady=(0, 10))
@@ -522,7 +682,7 @@ class SideTabWizardApp:
         ttk.Label(f1, text="Passo 1: Modo de Operação", style="Header.TLabel").pack(anchor=tk.W)
         ttk.Label(
             f1,
-            text="Escolha se deseja criar um novo arquivo Word do zero ou atualizar um existente.",
+            text="Escolha a operação desejada: criar/atualizar um arquivo Word ou listar os totais das turmas.",
             style="SubHeader.TLabel",
         ).pack(anchor=tk.W, pady=(2, 15))
 
@@ -541,6 +701,13 @@ class SideTabWizardApp:
             text="ATUALIZAR um arquivo Word existente",
             variable=self.opcao_modo,
             value="2",
+            command=self._atualizar_resumo,
+        ).pack(anchor=tk.W, pady=5)
+        ttk.Radiobutton(
+            f1_card,
+            text="Listar os números totais das turmas (Apenas leitura/Resumo)",
+            variable=self.opcao_modo,
+            value="3",
             command=self._atualizar_resumo,
         ).pack(anchor=tk.W, pady=5)
 
@@ -569,16 +736,51 @@ class SideTabWizardApp:
         )
         self.frames_passos[2] = f2
 
-        # Passo 3: Layout Tabela
+        # Passo 3: Layout Tabela e Formatação do Nome
         f3 = ttk.Frame(self.center_content)
-        ttk.Label(f3, text="Passo 3: Layout da Tabela", style="Header.TLabel").pack(anchor=tk.W)
+        ttk.Label(f3, text="Passo 3: Layout da Tabela e Nomes", style="Header.TLabel").pack(anchor=tk.W)
         ttk.Label(
             f3,
-            text="As colunas 'N.º' e 'Nome do Estudante' são fixas.\nAdicione ou remova colunas adicionais para a sua tabela abaixo:",
+            text="Configure a formatação dos nomes e adicione/remova colunas da sua tabela abaixo:",
             style="SubHeader.TLabel",
         ).pack(anchor=tk.W, pady=(2, 15))
 
-        f3_card = ttk.LabelFrame(f3, text=" Adicionar Nova Coluna ", padding="15")
+        # CARD: Formatação dos Nomes (AA / Aa)
+        f3_case_card = ttk.LabelFrame(f3, text=" Formatação dos Nomes dos Estudantes ", padding="12")
+        f3_case_card.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(
+            f3_case_card,
+            text="Escolha o estilo de texto para os nomes dos estudantes:",
+        ).pack(anchor=tk.W, pady=(0, 6))
+
+        frame_btns_case = ttk.Frame(f3_case_card)
+        frame_btns_case.pack(anchor=tk.W)
+
+        fonte_times_bold = ("Times New Roman", 12, "bold")
+
+        self.btn_case_upper = tk.Button(
+            frame_btns_case,
+            text="AA",
+            font=fonte_times_bold,
+            width=5,
+            command=lambda: self._definir_opcao_case("upper"),
+        )
+        self.btn_case_upper.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.btn_case_title = tk.Button(
+            frame_btns_case,
+            text="Aa",
+            font=fonte_times_bold,
+            width=5,
+            command=lambda: self._definir_opcao_case("title"),
+        )
+        self.btn_case_title.pack(side=tk.LEFT)
+
+        self._atualizar_botoes_case()
+
+        # CARD: Colunas Extras
+        f3_card = ttk.LabelFrame(f3, text=" Adicionar Nova Coluna ", padding="12")
         f3_card.pack(fill=tk.X, pady=(0, 10))
 
         frame_input_col = ttk.Frame(f3_card)
@@ -594,11 +796,11 @@ class SideTabWizardApp:
             command=self._adicionar_coluna_extra,
         ).pack(side=tk.RIGHT)
 
-        f3_list_card = ttk.LabelFrame(f3, text=" Colunas Adicionais Configuradas ", padding="15")
+        f3_list_card = ttk.LabelFrame(f3, text=" Colunas Adicionais Configuradas ", padding="12")
         f3_list_card.pack(fill=tk.BOTH, expand=True, pady=5)
 
         self.listbox_colunas = tk.Listbox(
-            f3_list_card, height=5, font=("TkDefaultFont", 9), selectmode=tk.SINGLE
+            f3_list_card, height=4, font=("TkDefaultFont", 9), selectmode=tk.SINGLE
         )
         self.listbox_colunas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
 
@@ -659,7 +861,7 @@ class SideTabWizardApp:
         ttk.Label(f5, text="Passo 5: Processamento e Execução", style="Header.TLabel").pack(anchor=tk.W)
         ttk.Label(
             f5,
-            text="Clique no botão para iniciar a extração e geração do documento.",
+            text="Clique no botão para iniciar o processamento.",
             style="SubHeader.TLabel",
         ).pack(anchor=tk.W, pady=(2, 15))
 
@@ -708,7 +910,20 @@ class SideTabWizardApp:
         if btn_proximo_cmd and btn_proximo_txt:
             ttk.Button(nav_frame, text=btn_proximo_txt, command=btn_proximo_cmd).pack(side=tk.RIGHT)
 
-    # --- GERENCIAMENTO DAS COLUNAS EXTRAS ---
+    # --- GERENCIAMENTO DA CAIXA DOS NOMES E COLUNAS EXTRAS ---
+
+    def _definir_opcao_case(self, modo):
+        self.opcao_case.set(modo)
+        self._atualizar_botoes_case()
+        self._atualizar_resumo()
+
+    def _atualizar_botoes_case(self):
+        if self.opcao_case.get() == "upper":
+            self.btn_case_upper.config(bg="#c5c5c5", fg="black", relief=tk.SUNKEN)
+            self.btn_case_title.config(bg="#f0f0f0", fg="black", relief=tk.RAISED)
+        else:
+            self.btn_case_upper.config(bg="#f0f0f0", fg="black", relief=tk.RAISED)
+            self.btn_case_title.config(bg="#c5c5c5", fg="black", relief=tk.SUNKEN)
 
     def _adicionar_coluna_extra(self):
         titulo = self.entry_nova_coluna.get().strip()
@@ -743,11 +958,20 @@ class SideTabWizardApp:
     # --- NAVEGAÇÃO E LÓGICA DO WIZARD ---
 
     def _exibir_passo(self, passo_num):
-        if passo_num == 3 and self.opcao_modo.get() == "2":
-            if self.passo_atual < 3:
-                passo_num = 4
-            else:
-                passo_num = 2
+        modo = self.opcao_modo.get()
+
+        if modo == "3":
+            if passo_num in [2, 3]:
+                if self.passo_atual < 2:
+                    passo_num = 4
+                else:
+                    passo_num = 1
+        elif modo == "2":
+            if passo_num == 3:
+                if self.passo_atual < 3:
+                    passo_num = 4
+                else:
+                    passo_num = 2
 
         self.passo_atual = passo_num
         if passo_num > self.max_passo_alcancado:
@@ -757,14 +981,20 @@ class SideTabWizardApp:
             f.pack_forget()
 
         if passo_num == 2:
-            if self.opcao_modo.get() == "1":
+            if modo == "1":
                 self.lbl_p2_titulo.config(text="Passo 2: Onde salvar o NOVO arquivo Word?")
                 self.lbl_p2_desc.config(text="Escolha o local e nome para salvar o documento gerado.")
-            else:
+            elif modo == "2":
                 self.lbl_p2_titulo.config(text="Passo 2: Seleção do arquivo Word EXISTENTE")
                 self.lbl_p2_desc.config(
                     text="Escolha o arquivo .docx que deseja atualizar com novos dados."
                 )
+
+        if passo_num == 5:
+            if modo == "3":
+                self.btn_gerar.config(text="📊 Calcular Totais das Turmas")
+            else:
+                self.btn_gerar.config(text="⚡ Gerar Documento Word")
 
         self.frames_passos[passo_num].pack(fill=tk.BOTH, expand=True)
         self._atualizar_sidebar_visual()
@@ -775,7 +1005,11 @@ class SideTabWizardApp:
         for num, lbl in self.labels_sidebar.items():
             nome_passo = self.passos_info[num - 1][1]
 
-            if num == 3 and modo == "2":
+            if modo == "3" and num in [2, 3]:
+                lbl.config(style="StepItem.TLabel", text=f"  {num}. {nome_passo} (Inativo)")
+                continue
+
+            if modo == "2" and num == 3:
                 lbl.config(style="StepItem.TLabel", text=f"  {num}. {nome_passo} (Inativo)")
                 continue
 
@@ -787,11 +1021,17 @@ class SideTabWizardApp:
                 lbl.config(style="StepItem.TLabel", text=f"  {num}. {nome_passo}")
 
     def _clique_aba_lateral(self, passo_num):
+        modo = self.opcao_modo.get()
+        if modo == "3" and passo_num in [2, 3]:
+            return
+        if modo == "2" and passo_num == 3:
+            return
         if passo_num <= self.max_passo_alcancado:
             self._exibir_passo(passo_num)
 
     def _avancar_passo(self, passo_origem):
-        if passo_origem == 2 and not self.caminho_word:
+        modo = self.opcao_modo.get()
+        if passo_origem == 2 and modo != "3" and not self.caminho_word:
             messagebox.showwarning("Atenção", "Por favor, selecione um arquivo Word antes de avançar.")
             return
 
@@ -860,29 +1100,43 @@ class SideTabWizardApp:
         modo = self.opcao_modo.get()
         if modo == "1":
             self.sum_val_modo.config(text="Criar Novo Documento")
-        else:
+        elif modo == "2":
             self.sum_val_modo.config(text="Atualizar Existente")
-
-        if self.caminho_word:
-            self.sum_val_word.config(text=os.path.basename(self.caminho_word))
         else:
-            self.sum_val_word.config(text="Não selecionado")
+            self.sum_val_modo.config(text="Listar Totais das Turmas")
 
-        if modo == "2":
-            self.sum_val_layout.config(text="Extraído do Word existente")
+        if modo == "3":
+            self.sum_val_word.config(text="Não necessário")
+            self.sum_val_case.config(text="Não aplicável")
+            self.sum_val_layout.config(text="Não necessário")
         else:
-            qtd_extras = len(self.colunas_extras)
-            if qtd_extras == 0:
-                self.sum_val_layout.config(text="2 Colunas (N.º, Nome)")
+            if self.caminho_word:
+                self.sum_val_word.config(text=os.path.basename(self.caminho_word))
             else:
-                cols_txt = ", ".join(self.colunas_extras)
-                self.sum_val_layout.config(text=f"{2 + qtd_extras} Colunas (N.º, Nome, {cols_txt})")
+                self.sum_val_word.config(text="Não selecionado")
+
+            if self.opcao_case.get() == "upper":
+                self.sum_val_case.config(text="TUDO MAIÚSCULO (AA)")
+            else:
+                self.sum_val_case.config(text="Primeira Maiúscula (Aa)")
+
+            if modo == "2":
+                self.sum_val_layout.config(text="Extraído do Word existente")
+            else:
+                qtd_extras = len(self.colunas_extras)
+                if qtd_extras == 0:
+                    self.sum_val_layout.config(text="2 Colunas (N.º, Nome)")
+                else:
+                    cols_txt = ", ".join(self.colunas_extras)
+                    self.sum_val_layout.config(text=f"{2 + qtd_extras} Colunas (N.º, Nome, {cols_txt})")
 
         total_pdfs = len(self.caminhos_pdfs)
         if total_pdfs == 0:
             self.sum_val_pdfs.config(text="Nenhum PDF selecionado")
         else:
             self.sum_val_pdfs.config(text=f"{total_pdfs} arquivo(s) selecionado(s)")
+
+        self._atualizar_sidebar_visual()
 
     # --- EXECUÇÃO DO PROCESSAMENTO ---
 
@@ -901,7 +1155,8 @@ class SideTabWizardApp:
         self.lbl_porcentagem.config(text=f"{v}%")
 
     def _executar_processamento(self):
-        if not self.caminho_word:
+        modo = self.opcao_modo.get()
+        if modo != "3" and not self.caminho_word:
             messagebox.showwarning("Erro", "Arquivo Word não selecionado!")
             return
         if not self.caminhos_pdfs:
@@ -918,57 +1173,92 @@ class SideTabWizardApp:
             dados_consolidados = {}
             modo = self.opcao_modo.get()
 
-            inicio_pdf = 10 if modo == "2" else 0
-            fim_pdf = 70
+            if modo == "3":
+                self._log("--- Lendo arquivos PDF para cálculo de totais ---")
+                total_pdfs = len(self.caminhos_pdfs)
+                for i_pdf, caminho_pdf in enumerate(self.caminhos_pdfs):
 
-            if modo == "2":
-                self._log("Lendo dados do arquivo Word existente...")
-                self._set_progresso(5)
-                dados_consolidados, self.colunas_extras = ler_dados_word_existente(self.caminho_word)
-                self._set_progresso(10)
+                    def pdf_prog_cb(fatia_pag, index=i_pdf):
+                        prog_pdf = (index + fatia_pag) / total_pdfs
+                        val = prog_pdf * 90
+                        self._set_progresso(val)
 
-            total_pdfs = len(self.caminhos_pdfs)
-            for i_pdf, caminho_pdf in enumerate(self.caminhos_pdfs):
+                    novos_dados = extrair_dados_pdf(
+                        caminho_pdf,
+                        log_callback=self._log,
+                        progress_callback=pdf_prog_cb,
+                    )
+                    for turma, alunos in novos_dados.items():
+                        if turma not in dados_consolidados:
+                            dados_consolidados[turma] = {}
+                        for num, info in alunos.items():
+                            dados_consolidados[turma][num] = info
 
-                def pdf_prog_cb(fatia_pag, index=i_pdf):
-                    prog_pdf = (index + fatia_pag) / total_pdfs
-                    val = inicio_pdf + prog_pdf * (fim_pdf - inicio_pdf)
+                self._set_progresso(95)
+                self._log("\nCalculando totais dos alunos matriculados...")
+
+                relatorio = gerar_relatorio_totais(dados_consolidados)
+                self._log("\n" + relatorio + "\n")
+                self._set_progresso(100)
+
+                self.root.after(
+                    0,
+                    lambda: self._exibir_janela_relatorio(relatorio),
+                )
+
+            else:
+                inicio_pdf = 10 if modo == "2" else 0
+                fim_pdf = 70
+
+                if modo == "2":
+                    self._log("Lendo dados do arquivo Word existente...")
+                    self._set_progresso(5)
+                    dados_consolidados, self.colunas_extras = ler_dados_word_existente(self.caminho_word)
+                    self._set_progresso(10)
+
+                total_pdfs = len(self.caminhos_pdfs)
+                for i_pdf, caminho_pdf in enumerate(self.caminhos_pdfs):
+
+                    def pdf_prog_cb(fatia_pag, index=i_pdf):
+                        prog_pdf = (index + fatia_pag) / total_pdfs
+                        val = inicio_pdf + prog_pdf * (fim_pdf - inicio_pdf)
+                        self._set_progresso(val)
+
+                    novos_dados = extrair_dados_pdf(
+                        caminho_pdf,
+                        log_callback=self._log,
+                        progress_callback=pdf_prog_cb,
+                    )
+                    for turma, alunos in novos_dados.items():
+                        if turma not in dados_consolidados:
+                            dados_consolidados[turma] = {}
+                        for num, info in alunos.items():
+                            dados_consolidados[turma][num] = info
+
+                self._set_progresso(70)
+
+                def word_prog_cb(fatia_turma):
+                    val = 70 + fatia_turma * 30
                     self._set_progresso(val)
 
-                novos_dados = extrair_dados_pdf(
-                    caminho_pdf,
+                gerar_documento_word(
+                    dados_consolidados,
+                    self.caminho_word,
+                    colunas_extras=self.colunas_extras,
+                    opcao_case=self.opcao_case.get(),
                     log_callback=self._log,
-                    progress_callback=pdf_prog_cb,
+                    progress_callback=word_prog_cb,
                 )
-                for turma, alunos in novos_dados.items():
-                    if turma not in dados_consolidados:
-                        dados_consolidados[turma] = {}
-                    for num, info in alunos.items():
-                        dados_consolidados[turma][num] = info
 
-            self._set_progresso(70)
+                self._set_progresso(100)
 
-            def word_prog_cb(fatia_turma):
-                val = 70 + fatia_turma * 30
-                self._set_progresso(val)
-
-            gerar_documento_word(
-                dados_consolidados,
-                self.caminho_word,
-                colunas_extras=self.colunas_extras,
-                log_callback=self._log,
-                progress_callback=word_prog_cb,
-            )
-
-            self._set_progresso(100)
-
-            self.root.after(
-                0,
-                lambda: messagebox.showinfo(
-                    "Sucesso",
-                    f"Processo concluído com sucesso!\nSalvo em: {self.caminho_word}",
-                ),
-            )
+                self.root.after(
+                    0,
+                    lambda: messagebox.showinfo(
+                        "Sucesso",
+                        f"Processo concluído com sucesso!\nSalvo em: {self.caminho_word}",
+                    ),
+                )
         except Exception as e:
             self.root.after(
                 0,
@@ -979,17 +1269,48 @@ class SideTabWizardApp:
         finally:
             self.root.after(0, self._finalizar_execucao)
 
+    def _exibir_janela_relatorio(self, relatorio_texto):
+        """Abre uma janela secundária exibindo o relatório com botão de copiar."""
+        top = tk.Toplevel(self.root)
+        top.title("Relatório de Totais das Turmas")
+        top.geometry("650x550")
+        top.transient(self.root)
+        top.grab_set()
+
+        lbl = ttk.Label(
+            top, text="Resumo de Alunos Matriculados", font=("TkDefaultFont", 11, "bold")
+        )
+        lbl.pack(anchor=tk.W, padx=15, pady=(15, 5))
+
+        txt = scrolledtext.ScrolledText(top, font=("Consolas", 10))
+        txt.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
+        txt.insert(tk.END, relatorio_texto)
+        txt.config(state="disabled")
+
+        def copiar():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(relatorio_texto)
+            messagebox.showinfo("Copiado", "Relatório copiado para a área de transferência!", parent=top)
+
+        btn_frame = ttk.Frame(top)
+        btn_frame.pack(fill=tk.X, padx=15, pady=10)
+
+        ttk.Button(btn_frame, text="📋 Copiar Relatório", command=copiar).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Fechar", command=top.destroy).pack(side=tk.RIGHT)
+
     def _finalizar_execucao(self):
         self.btn_gerar.config(state="normal")
 
     def reiniciar(self):
         self.opcao_modo.set("1")
+        self.opcao_case.set("upper")
         self.caminho_word = ""
         self.colunas_extras = []
         self.caminhos_pdfs = []
         self.entry_nova_coluna.delete(0, tk.END)
 
         self.lbl_word_selected.config(text="Nenhum arquivo selecionado.")
+        self._atualizar_botoes_case()
         self._atualizar_listbox_colunas()
         self._atualizar_listbox_pdfs()
 
