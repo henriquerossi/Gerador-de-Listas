@@ -2,6 +2,9 @@ import os
 import re
 import threading
 import ctypes
+import tempfile
+import webbrowser
+from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from docx import Document
@@ -12,7 +15,6 @@ from docx.oxml.ns import nsdecls
 from docx.shared import Cm, Pt, RGBColor
 import pdfplumber
 
-# --- ATIVAÇÃO DE ALTA RESOLUÇÃO (DPI AWARENESS) ---
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
@@ -25,11 +27,10 @@ CURSOS_PERMITIDOS = [
     "CLASSE ESPECIAL D.I.",
     "ENSINO FUND.1/5 ANO-SERIE",
     "EDUC INFANTIL",
+    "EDUC. INFANTIL",
+    "EDUCAÇÃO INFANTIL",
+    "EDUCACAO INFANTIL",
 ]
-
-
-# --- FUNÇÕES DE PROCESSAMENTO DO WORD E PDF ---
-
 
 def aplicar_cor_fundo_celula(celula, hex_color="E0E0E0"):
     """Aplica cor de fundo (shading) numa célula da tabela do Word."""
@@ -64,7 +65,6 @@ def formatar_titulo_turma(curso, seriacao, letra_turma):
     else:
         return f"{seriacao} - Turma {letra_turma}"
 
-
 def normalizar_turno(turno_raw):
     """Padroniza o nome do turno para Manhã, Tarde, Noite, etc."""
     if not turno_raw:
@@ -82,7 +82,11 @@ def normalizar_turno(turno_raw):
 
 
 def formatar_nome_serie(seriacao):
-    """Extrai uma representação limpa da série (ex: '1º', '2º', 'Classe Especial D.I.')."""
+    """Extrai uma representação limpa da série (ex: '1º', '2º', 'Infantil 4', 'Classe Especial D.I.')."""
+    seriacao_upper = seriacao.upper().strip()
+    if any(k in seriacao_upper for k in ["INFANTIL", "PRE", "PRÉ", "MATERNAL"]):
+        return seriacao.strip()
+
     match = re.search(r"(\d+[º°]?)", seriacao)
     if match:
         num_serie = match.group(1)
@@ -93,7 +97,11 @@ def formatar_nome_serie(seriacao):
 
 
 def formatar_nome_curto_turma(seriacao, letra_turma, turma_titulo):
-    """Gera um nome curto para a turma (ex: '1º A', '2º B', 'D.I. - Turma A')."""
+    """Gera um nome curto para a turma (ex: '1º A', '2º B', 'Infantil 4 A', 'D.I. - Turma A')."""
+    seriacao_upper = seriacao.upper().strip()
+    if any(k in seriacao_upper for k in ["INFANTIL", "PRE", "PRÉ", "MATERNAL"]):
+        return f"{seriacao.strip()} {letra_turma.strip()}".strip()
+
     match = re.search(r"(\d+[º°]?)", seriacao)
     if match and letra_turma:
         num_serie = match.group(1)
@@ -102,11 +110,23 @@ def formatar_nome_curto_turma(seriacao, letra_turma, turma_titulo):
         return f"{num_serie} {letra_turma.strip()}"
     return turma_titulo.strip()
 
-
 def chave_ordenacao_natural(texto):
     """Chave para ordenação natural de strings com números (ex: 1º, 2º... 10º)."""
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r"(\d+)", str(texto))]
 
+
+def ordenar_turnos(turno_nome):
+    """Ordena turnos dando prioridade a Manhã, depois Tarde e demais."""
+    t = str(turno_nome).upper().strip()
+    if "MANH" in t or "MATUTIN" in t:
+        return (0, t)
+    if "TARD" in t or "VESPERTIN" in t:
+        return (1, t)
+    if "INTEGRAL" in t:
+        return (2, t)
+    if "NOIT" in t or "NOTURN" in t:
+        return (3, t)
+    return (4, t)
 
 def calcular_larguras_colunas(colunas_extras, largura_total_cm=18.0):
     """Retorna as larguras originais padrão para as colunas da tabela."""
@@ -124,7 +144,6 @@ def calcular_larguras_colunas(colunas_extras, largura_total_cm=18.0):
 
     larguras_finais = [Cm(w_num), Cm(w_nome)] + [Cm(w) for w in w_extras]
     return larguras_finais
-
 
 def extrair_dados_pdf(caminho_pdf, log_callback=None, progress_callback=None):
     """Extrai turmas e alunos do PDF filtrando os cursos permitidos."""
@@ -215,13 +234,14 @@ def extrair_dados_pdf(caminho_pdf, log_callback=None, progress_callback=None):
 
     return turmas
 
-
-def gerar_relatorio_totais(dados_consolidados):
-    """Calcula e formata os números totais de alunos matriculados."""
+def calcular_totais_dados(dados_consolidados):
+    """Calcula os totais e agrupa turmas por turno (Manhã, Tarde, etc.)."""
     total_matriculados = 0
+    por_curso = {}
     por_turno = {}
     por_serie = {}
     por_turma = {}
+    por_turma_agrupado = {}
 
     for turma_titulo, alunos in dados_consolidados.items():
         count_turma_matriculados = 0
@@ -236,11 +256,13 @@ def gerar_relatorio_totais(dados_consolidados):
                 total_matriculados += 1
                 count_turma_matriculados += 1
 
+                curso = aluno.get("curso", "Não informado")
                 turno = aluno.get("turno", "Não informado")
                 seriacao = aluno.get("seriacao", "Outros")
 
                 nome_serie = formatar_nome_serie(seriacao)
 
+                por_curso[curso] = por_curso.get(curso, 0) + 1
                 por_turno[turno] = por_turno.get(turno, 0) + 1
                 por_serie[nome_serie] = por_serie.get(nome_serie, 0) + 1
 
@@ -250,7 +272,9 @@ def gerar_relatorio_totais(dados_consolidados):
         if sample_aluno:
             seriacao = sample_aluno.get("seriacao", "")
             letra_turma = sample_aluno.get("letra_turma", "")
-            turno_turma = sample_aluno.get("turno", "")
+            turno_turma = sample_aluno.get("turno", "Não informado")
+            if not turno_turma:
+                turno_turma = "Não informado"
 
             nome_curto_turma = formatar_nome_curto_turma(
                 seriacao, letra_turma, turma_titulo
@@ -263,47 +287,18 @@ def gerar_relatorio_totais(dados_consolidados):
 
             por_turma[rotulo_turma] = count_turma_matriculados
 
-    # Construção do texto do relatório
-    linhas = []
-    linhas.append("=" * 65)
-    linhas.append("          RELATÓRIO DE TOTAIS DE ALUNOS MATRICULADOS")
-    linhas.append("=" * 65)
-    linhas.append("")
-    linhas.append(f"TOTAL GERAL DE MATRICULADOS: {total_matriculados} aluno(s)")
-    linhas.append("")
-    linhas.append("-" * 65)
-    linhas.append("TOTAL POR TURNO:")
-    linhas.append("-" * 65)
-    if por_turno:
-        for turno in sorted(por_turno.keys(), key=chave_ordenacao_natural):
-            linhas.append(f"  • {turno}: {por_turno[turno]} aluno(s)")
-    else:
-        linhas.append("  Nenhum aluno matriculado encontrado.")
+            if turno_turma not in por_turma_agrupado:
+                por_turma_agrupado[turno_turma] = {}
+            por_turma_agrupado[turno_turma][nome_curto_turma] = count_turma_matriculados
 
-    linhas.append("")
-    linhas.append("-" * 65)
-    linhas.append("TOTAL POR SÉRIE:")
-    linhas.append("-" * 65)
-    if por_serie:
-        for serie in sorted(por_serie.keys(), key=chave_ordenacao_natural):
-            linhas.append(f"  • {serie}: {por_serie[serie]} aluno(s)")
-    else:
-        linhas.append("  Nenhum aluno matriculado encontrado.")
-
-    linhas.append("")
-    linhas.append("-" * 65)
-    linhas.append("TOTAL POR TURMA:")
-    linhas.append("-" * 65)
-    if por_turma:
-        for t_nome in sorted(por_turma.keys(), key=chave_ordenacao_natural):
-            linhas.append(f"  • {t_nome}: {por_turma[t_nome]} aluno(s)")
-    else:
-        linhas.append("  Nenhum aluno matriculado encontrado.")
-
-    linhas.append("=" * 65)
-
-    return "\n".join(linhas)
-
+    return {
+        "total_geral": total_matriculados,
+        "por_curso": por_curso,
+        "por_turno": por_turno,
+        "por_serie": por_serie,
+        "por_turma": por_turma,
+        "por_turma_agrupado": por_turma_agrupado,
+    }
 
 def ler_dados_word_existente(caminho_word):
     """Lê um ficheiro Word existente, extrai os dados e detecta as colunas extras."""
@@ -375,7 +370,6 @@ def ler_dados_word_existente(caminho_word):
                 tabela_idx += 1
 
     return turmas_existentes, colunas_extras
-
 
 def gerar_documento_word(
     turmas_dados,
@@ -469,7 +463,7 @@ def gerar_documento_word(
             situacao_str = aluno["situacao"].capitalize()
             is_especial = situacao_str in ["Transferido", "Remanejado"]
 
-            # Formatação do nome (Tudo maiúsculo ou Primeira Letra Maiúscula)
+            # Formatação do nome
             nome_formatado = aluno["nome"]
             if opcao_case == "upper":
                 nome_formatado = nome_formatado.upper()
@@ -486,15 +480,14 @@ def gerar_documento_word(
             )
 
             if is_especial:
-                formatar_paragrafo_celula(
-                    row_cells[1].paragraphs[0],
-                    nome_formatado,
-                    WD_ALIGN_PARAGRAPH.LEFT,
-                    bold=False,
-                    font_size=12,
-                )
-
                 if len(colunas_extras) >= 2:
+                    formatar_paragrafo_celula(
+                        row_cells[1].paragraphs[0],
+                        nome_formatado,
+                        WD_ALIGN_PARAGRAPH.LEFT,
+                        bold=False,
+                        font_size=12,
+                    )
                     celula_mesclada_extras = row_cells[2].merge(row_cells[-1])
                     celula_mesclada_extras.width = sum(larguras[2:])
                     formatar_paragrafo_celula(
@@ -506,6 +499,13 @@ def gerar_documento_word(
                     )
                 elif len(colunas_extras) == 1:
                     formatar_paragrafo_celula(
+                        row_cells[1].paragraphs[0],
+                        nome_formatado,
+                        WD_ALIGN_PARAGRAPH.LEFT,
+                        bold=False,
+                        font_size=12,
+                    )
+                    formatar_paragrafo_celula(
                         row_cells[2].paragraphs[0],
                         situacao_str,
                         WD_ALIGN_PARAGRAPH.CENTER,
@@ -513,13 +513,25 @@ def gerar_documento_word(
                         font_size=12,
                     )
                 else:
-                    formatar_paragrafo_celula(
-                        row_cells[1].paragraphs[0],
-                        f"{nome_formatado} - {situacao_str}",
-                        WD_ALIGN_PARAGRAPH.LEFT,
-                        bold=False,
-                        font_size=12,
-                    )
+                    # Quando NÃO há colunas extras: o nome fica normal e o " - Transferido" / " - Remanejado" em NEGRITO
+                    p_nome = row_cells[1].paragraphs[0]
+                    p_nome.text = ""
+                    p_nome.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                    p_nome.paragraph_format.space_before = Pt(2)
+                    p_nome.paragraph_format.space_after = Pt(2)
+                    p_nome.paragraph_format.line_spacing = 1.0
+
+                    # Run 1: Nome do Aluno (Normal)
+                    run_nome = p_nome.add_run(nome_formatado)
+                    run_nome.font.name = "Arial"
+                    run_nome.font.size = Pt(12)
+                    run_nome.bold = False
+
+                    # Run 2: " - Situacao" (Negrito)
+                    run_status = p_nome.add_run(f" - {situacao_str}")
+                    run_status.font.name = "Arial"
+                    run_status.font.size = Pt(12)
+                    run_status.bold = True
 
                 for cell in row_cells:
                     aplicar_cor_fundo_celula(cell, "E0E0E0")
@@ -545,10 +557,6 @@ def gerar_documento_word(
     doc.save(caminho_saida)
     if log_callback:
         log_callback("Documento salvo com sucesso!")
-
-
-# --- INTERFACE WIZARD COM ABAS LATERAIS E RESUMO ---
-
 
 class SideTabWizardApp:
 
@@ -910,8 +918,6 @@ class SideTabWizardApp:
         if btn_proximo_cmd and btn_proximo_txt:
             ttk.Button(nav_frame, text=btn_proximo_txt, command=btn_proximo_cmd).pack(side=tk.RIGHT)
 
-    # --- GERENCIAMENTO DA CAIXA DOS NOMES E COLUNAS EXTRAS ---
-
     def _definir_opcao_case(self, modo):
         self.opcao_case.set(modo)
         self._atualizar_botoes_case()
@@ -954,8 +960,6 @@ class SideTabWizardApp:
         self.listbox_colunas.delete(0, tk.END)
         for col in self.colunas_extras:
             self.listbox_colunas.insert(tk.END, col)
-
-    # --- NAVEGAÇÃO E LÓGICA DO WIZARD ---
 
     def _exibir_passo(self, passo_num):
         modo = self.opcao_modo.get()
@@ -1138,8 +1142,6 @@ class SideTabWizardApp:
 
         self._atualizar_sidebar_visual()
 
-    # --- EXECUÇÃO DO PROCESSAMENTO ---
-
     def _log(self, mensagem):
         self.txt_log.config(state="normal")
         self.txt_log.insert(tk.END, mensagem + "\n")
@@ -1197,13 +1199,13 @@ class SideTabWizardApp:
                 self._set_progresso(95)
                 self._log("\nCalculando totais dos alunos matriculados...")
 
-                relatorio = gerar_relatorio_totais(dados_consolidados)
-                self._log("\n" + relatorio + "\n")
+                dados_totais = calcular_totais_dados(dados_consolidados)
+                self._log("Concluído! Exibindo relatório na tela de totais.")
                 self._set_progresso(100)
 
                 self.root.after(
                     0,
-                    lambda: self._exibir_janela_relatorio(relatorio),
+                    lambda: self._exibir_janela_relatorio(dados_totais),
                 )
 
             else:
@@ -1269,34 +1271,364 @@ class SideTabWizardApp:
         finally:
             self.root.after(0, self._finalizar_execucao)
 
-    def _exibir_janela_relatorio(self, relatorio_texto):
-        """Abre uma janela secundária exibindo o relatório com botão de copiar."""
+    def _exibir_janela_relatorio(self, dados_totais):
+        """Abre uma janela secundária exibindo os totais organizados por seções e agrupados por turno."""
         top = tk.Toplevel(self.root)
         top.title("Relatório de Totais das Turmas")
-        top.geometry("650x550")
+        top.geometry("680x600")
         top.transient(self.root)
         top.grab_set()
 
-        lbl = ttk.Label(
-            top, text="Resumo de Alunos Matriculados", font=("TkDefaultFont", 11, "bold")
+        # BARRA SUPERIOR COM BOTÃO DE IMPRESSÃO
+        top_bar = ttk.Frame(top, padding="10")
+        top_bar.pack(side=tk.TOP, fill=tk.X)
+
+        btn_imprimir = ttk.Button(
+            top_bar,
+            text="🖨️ Imprimir Relatório (A4)",
+            command=lambda: self._imprimir_relatorio_a4(dados_totais),
         )
-        lbl.pack(anchor=tk.W, padx=15, pady=(15, 5))
+        btn_imprimir.pack(side=tk.LEFT)
 
-        txt = scrolledtext.ScrolledText(top, font=("Consolas", 10))
-        txt.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
-        txt.insert(tk.END, relatorio_texto)
-        txt.config(state="disabled")
+        ttk.Separator(top, orient="horizontal").pack(fill=tk.X, padx=10, pady=(0, 5))
 
-        def copiar():
-            self.root.clipboard_clear()
-            self.root.clipboard_append(relatorio_texto)
-            messagebox.showinfo("Copiado", "Relatório copiado para a área de transferência!", parent=top)
+        # ÁREA DE SCROLL COM CANVAS E SCROLLBAR
+        canvas = tk.Canvas(top, borderwidth=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(top, orient="vertical", command=canvas.yview)
+        scroll_frame = ttk.Frame(canvas, padding="15")
 
-        btn_frame = ttk.Frame(top)
-        btn_frame.pack(fill=tk.X, padx=15, pady=10)
+        scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
 
-        ttk.Button(btn_frame, text="📋 Copiar Relatório", command=copiar).pack(side=tk.LEFT)
-        ttk.Button(btn_frame, text="Fechar", command=top.destroy).pack(side=tk.RIGHT)
+        canvas_window = canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+
+        canvas.bind("<Configure>", _on_canvas_configure)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        # ROLAGEM COM O SCROLL DO MOUSE
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        top.bind("<Destroy>", lambda e: top.unbind_all("<MouseWheel>"))
+
+        # CABEÇALHO DA JANELA
+        lbl_titulo = ttk.Label(
+            scroll_frame,
+            text="Relatório de Totais de Alunos Matriculados",
+            font=("TkDefaultFont", 12, "bold"),
+        )
+        lbl_titulo.pack(anchor=tk.W, pady=(0, 10))
+
+        # CARD: TOTAL GERAL
+        card_geral = ttk.LabelFrame(scroll_frame, text=" Total Geral ", padding="12")
+        card_geral.pack(fill=tk.X, pady=(0, 10))
+
+        lbl_total = ttk.Label(
+            card_geral,
+            text=f"Total Geral de Matriculados: {dados_totais['total_geral']} aluno(s)",
+            font=("TkDefaultFont", 11, "bold"),
+            foreground="#0056b3",
+        )
+        lbl_total.pack(anchor=tk.W)
+
+        # FUNÇÃO AUXILIAR PARA CRIAR OS CARTÕES COM LABELS
+        def criar_secao_cards(parent, titulo, dicionario):
+            card = ttk.LabelFrame(parent, text=f" {titulo} ", padding="12")
+            card.pack(fill=tk.X, pady=(0, 10))
+
+            if not dicionario:
+                ttk.Label(
+                    card,
+                    text="Nenhum aluno matriculado encontrado.",
+                    font=("TkDefaultFont", 9, "italic"),
+                ).pack(anchor=tk.W)
+                return
+
+            row = 0
+            for chave in sorted(dicionario.keys(), key=chave_ordenacao_natural):
+                qtd = dicionario[chave]
+                lbl_item = ttk.Label(
+                    card, text=f"• {chave}:", font=("TkDefaultFont", 9)
+                )
+                lbl_item.grid(row=row, column=0, sticky=tk.W, padx=(0, 10), pady=2)
+
+                lbl_val = ttk.Label(
+                    card, text=f"{qtd} aluno(s)", font=("TkDefaultFont", 9, "bold")
+                )
+                lbl_val.grid(row=row, column=1, sticky=tk.W, pady=2)
+                row += 1
+
+        # SEÇÕES REGULARES
+        criar_secao_cards(scroll_frame, "Total por Curso", dados_totais["por_curso"])
+        criar_secao_cards(scroll_frame, "Total por Turno", dados_totais["por_turno"])
+        criar_secao_cards(scroll_frame, "Total por Série", dados_totais["por_serie"])
+
+        # CARD: TOTAL POR TURMA (AGRUPADO POR TURNO: MANHÃ, TARDE, ETC.)
+        card_turma = ttk.LabelFrame(scroll_frame, text=" Total por Turma ", padding="12")
+        card_turma.pack(fill=tk.X, pady=(0, 10))
+
+        por_turma_agrupado = dados_totais.get("por_turma_agrupado", {})
+
+        if not por_turma_agrupado:
+            ttk.Label(
+                card_turma,
+                text="Nenhum aluno matriculado encontrado.",
+                font=("TkDefaultFont", 9, "italic"),
+            ).pack(anchor=tk.W)
+        else:
+            row = 0
+            turnos_ordenados = sorted(por_turma_agrupado.keys(), key=ordenar_turnos)
+            for t_idx, turno in enumerate(turnos_ordenados):
+                turmas_dict = por_turma_agrupado[turno]
+
+                if t_idx > 0:
+                    lbl_espaco = ttk.Label(card_turma, text="")
+                    lbl_espaco.grid(row=row, column=0, columnspan=2, pady=2)
+                    row += 1
+
+                lbl_header_turno = ttk.Label(
+                    card_turma,
+                    text=f"📌 Turno: {turno}",
+                    font=("TkDefaultFont", 10, "bold"),
+                    foreground="#2F4F4F",
+                )
+                lbl_header_turno.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(4, 2))
+                row += 1
+
+                for turma_nome in sorted(turmas_dict.keys(), key=chave_ordenacao_natural):
+                    qtd = turmas_dict[turma_nome]
+                    lbl_item = ttk.Label(
+                        card_turma, text=f"   • {turma_nome}:", font=("TkDefaultFont", 9)
+                    )
+                    lbl_item.grid(row=row, column=0, sticky=tk.W, padx=(10, 10), pady=1)
+
+                    lbl_val = ttk.Label(
+                        card_turma, text=f"{qtd} aluno(s)", font=("TkDefaultFont", 9, "bold")
+                    )
+                    lbl_val.grid(row=row, column=1, sticky=tk.W, pady=1)
+                    row += 1
+
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def _imprimir_relatorio_a4(self, dados_totais):
+        """Gera um relatório HTML formatado em 12pt com turmas agrupadas por turno e solicita ao usuário escolher a impressora."""
+        try:
+            data_hora_geracao = datetime.now().strftime("%d/%m/%Y às %H:%M:%S")
+
+            def montar_tabela_html(dicionario):
+                if not dicionario:
+                    return "<p class='vazio'>Nenhum aluno matriculado encontrado.</p>"
+                rows = []
+                for chave in sorted(dicionario.keys(), key=chave_ordenacao_natural):
+                    qtd = dicionario[chave]
+                    rows.append(
+                        f"<tr><td class='label'>• {chave}</td><td class='val'>{qtd}</td></tr>"
+                    )
+                return f"<table>{''.join(rows)}</table>"
+
+            def montar_turmas_agrupadas_html(por_turma_agrupado):
+                if not por_turma_agrupado:
+                    return "<p class='vazio'>Nenhum aluno matriculado encontrado.</p>"
+
+                blocks = []
+                turnos_ordenados = sorted(por_turma_agrupado.keys(), key=ordenar_turnos)
+
+                for turno in turnos_ordenados:
+                    turmas_dict = por_turma_agrupado[turno]
+                    rows = []
+                    for turma_nome in sorted(turmas_dict.keys(), key=chave_ordenacao_natural):
+                        qtd = turmas_dict[turma_nome]
+                        rows.append(
+                            f"<tr><td class='label'>• {turma_nome}</td><td class='val'>{qtd}</td></tr>"
+                        )
+
+                    group_html = f"""
+                    <div class="turno-block">
+                        <div class="turno-header">Turno: {turno}</div>
+                        <table>{''.join(rows)}</table>
+                    </div>
+                    """
+                    blocks.append(group_html)
+
+                return "".join(blocks)
+
+            html_content = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Relatório de Totais de Turmas</title>
+    <style>
+        @page {{
+            size: A4 portrait;
+            margin: 1.5cm;
+        }}
+        body {{
+            font-family: Arial, Helvetica, sans-serif;
+            color: #222;
+            margin: 0;
+            padding: 0;
+            font-size: 12pt;
+            background: #fff;
+        }}
+        .header {{
+            text-align: center;
+            border-bottom: 2px solid #2f4f4f;
+            padding-bottom: 6px;
+            margin-bottom: 12px;
+        }}
+        .header h1 {{
+            margin: 0;
+            font-size: 16pt;
+            color: #2f4f4f;
+            text-transform: uppercase;
+        }}
+        .header p {{
+            margin: 4px 0 0 0;
+            font-size: 11pt;
+            color: #555;
+            font-weight: bold;
+        }}
+        .total-banner {{
+            background: #f0f4f8;
+            border: 1px solid #b8cce4;
+            border-radius: 4px;
+            padding: 8px 12px;
+            margin-bottom: 12px;
+            text-align: center;
+            font-size: 13pt;
+            font-weight: bold;
+            color: #0056b3;
+        }}
+        .columns-container {{
+            display: flex;
+            gap: 14px;
+            align-items: flex-start;
+        }}
+        .col-left, .col-right {{
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }}
+        .card {{
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            padding: 10px 12px;
+            background: #fff;
+            page-break-inside: avoid;
+            break-inside: avoid;
+        }}
+        .card-title {{
+            font-weight: bold;
+            font-size: 13pt;
+            color: #2f4f4f;
+            border-bottom: 1.5px solid #2f4f4f;
+            padding-bottom: 4px;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+        }}
+        .turno-block {{
+            margin-bottom: 10px;
+        }}
+        .turno-header {{
+            font-weight: bold;
+            font-size: 12pt;
+            color: #0056b3;
+            background-color: #eef5fc;
+            padding: 3px 6px;
+            border-left: 4px solid #0056b3;
+            margin-top: 6px;
+            margin-bottom: 4px;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+        }}
+        td {{
+            padding: 3px 6px;
+            vertical-align: middle;
+            border-bottom: 1px solid #eee;
+            font-size: 12pt;
+        }}
+        td.label {{
+            font-weight: normal;
+        }}
+        td.val {{
+            font-weight: bold;
+            text-align: right;
+            white-space: nowrap;
+        }}
+        p.vazio {{
+            font-style: italic;
+            color: #777;
+            margin: 0;
+            font-size: 11pt;
+        }}
+    </style>
+</head>
+<body onload="window.print();">
+    <div class="header">
+        <h1>Relatório de Totais de Alunos Matriculados</h1>
+        <p>Gerado em: {data_hora_geracao}</p>
+    </div>
+
+    <div class="total-banner">
+        Total Geral de Matriculados: {dados_totais['total_geral']} aluno(s)
+    </div>
+
+    <div class="columns-container">
+        <div class="col-left">
+            <div class="card">
+                <div class="card-title">Total por Curso</div>
+                {montar_tabela_html(dados_totais['por_curso'])}
+            </div>
+
+            <div class="card">
+                <div class="card-title">Total por Turno</div>
+                {montar_tabela_html(dados_totais['por_turno'])}
+            </div>
+
+            <div class="card">
+                <div class="card-title">Total por Série</div>
+                {montar_tabela_html(dados_totais['por_serie'])}
+            </div>
+        </div>
+
+        <div class="col-right">
+            <div class="card">
+                <div class="card-title">Total por Turma</div>
+                {montar_turmas_agrupadas_html(dados_totais.get('por_turma_agrupado', {}))}
+            </div>
+        </div>
+    </div>
+</body>
+</html>"""
+
+            temp_dir = tempfile.gettempdir()
+            caminho_html = os.path.join(temp_dir, "relatorio_totais_a4.html")
+
+            with open(caminho_html, "w", encoding="utf-8") as f:
+                f.write(html_content)
+
+            # Solicita a escolha da impressora via janela de impressão do navegador
+            messagebox.showinfo(
+                "Seleção de Impressora",
+                "O relatório será exibido no seu navegador para que você possa escolher em qual impressora imprimir.",
+            )
+            webbrowser.open(f"file://{os.path.abspath(caminho_html)}")
+
+        except Exception as e:
+            messagebox.showerror(
+                "Erro ao Imprimir",
+                f"Não foi possível processar o relatório de impressão:\n{str(e)}",
+            )
 
     def _finalizar_execucao(self):
         self.btn_gerar.config(state="normal")
@@ -1324,7 +1656,6 @@ class SideTabWizardApp:
 
         self._exibir_passo(1)
         self._atualizar_resumo()
-
 
 if __name__ == "__main__":
     root = tk.Tk()
