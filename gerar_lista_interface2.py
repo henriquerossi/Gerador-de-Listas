@@ -27,9 +27,6 @@ CURSOS_PERMITIDOS = [
     "CLASSE ESPECIAL D.I.",
     "ENSINO FUND.1/5 ANO-SERIE",
     "EDUC INFANTIL",
-    "EDUC. INFANTIL",
-    "EDUCAÇÃO INFANTIL",
-    "EDUCACAO INFANTIL",
 ]
 
 def aplicar_cor_fundo_celula(celula, hex_color="E0E0E0"):
@@ -37,6 +34,14 @@ def aplicar_cor_fundo_celula(celula, hex_color="E0E0E0"):
     tcPr = celula._tc.get_or_add_tcPr()
     shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="{hex_color}"/>')
     tcPr.append(shd)
+
+
+def aplicar_no_wrap_celula(celula):
+    """Aplica a propriedade XML w:noWrap para proibir estritamente quebra de linha na célula."""
+    tcPr = celula._tc.get_or_add_tcPr()
+    noWrap_xml = parse_xml(f'<w:noWrap {nsdecls("w")}/>')
+    if tcPr.find(noWrap_xml.tag) is None:
+        tcPr.append(noWrap_xml)
 
 
 def formatar_paragrafo_celula(
@@ -56,7 +61,6 @@ def formatar_paragrafo_celula(
         if color:
             run.font.color.rgb = color
 
-
 def formatar_titulo_turma(curso, seriacao, letra_turma):
     """Gera o título do cabeçalho da turma conforme as regras."""
     curso_upper = curso.upper().strip()
@@ -64,6 +68,7 @@ def formatar_titulo_turma(curso, seriacao, letra_turma):
         return f"D.I. - Turma {letra_turma}"
     else:
         return f"{seriacao} - Turma {letra_turma}"
+
 
 def normalizar_turno(turno_raw):
     """Padroniza o nome do turno para Manhã, Tarde, Noite, etc."""
@@ -110,6 +115,7 @@ def formatar_nome_curto_turma(seriacao, letra_turma, turma_titulo):
         return f"{num_serie} {letra_turma.strip()}"
     return turma_titulo.strip()
 
+
 def chave_ordenacao_natural(texto):
     """Chave para ordenação natural de strings com números (ex: 1º, 2º... 10º)."""
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r"(\d+)", str(texto))]
@@ -128,15 +134,77 @@ def ordenar_turnos(turno_nome):
         return (3, t)
     return (4, t)
 
-def calcular_larguras_colunas(colunas_extras, largura_total_cm=18.0):
-    """Retorna as larguras originais padrão para as colunas da tabela."""
-    w_num = 1.0   # Largura original N.º
-    w_nome = 11.0 # Largura Nome do Estudante
+def estimar_largura_texto_cm(texto, font_size_pt=12):
+    """Calcula uma estimativa da largura em cm de uma string no estilo Arial 12pt."""
+    if not texto:
+        return 0.0
 
+    total_pts = 0.0
+    for char in str(texto):
+        if char in "WMwmQ":
+            total_pts += 0.85
+        elif char.isupper():
+            if char in "IJLT":
+                total_pts += 0.42
+            elif char in "FEE":
+                total_pts += 0.60
+            else:
+                total_pts += 0.72
+        elif char.islower():
+            if char in "ijl":
+                total_pts += 0.28
+            elif char in "ftr":
+                total_pts += 0.38
+            else:
+                total_pts += 0.55
+        elif char.isdigit():
+            total_pts += 0.55
+        elif char in " -_./()":
+            total_pts += 0.35
+        else:
+            total_pts += 0.50
+
+    largura_cm = (total_pts * font_size_pt * 2.54) / 72.0
+    return largura_cm
+
+
+def calcular_larguras_colunas_turma(
+    alunos, colunas_extras, opcao_case="upper", largura_total_cm=18.0
+):
+    """
+    Calcula as larguras das colunas para uma turma específica.
+    Quando há colunas extras, a largura de 'Nome do Estudante' é dimensionada
+    exatamente ao maior nome daquela turma (+ margem de segurança), sem quebras de linha.
+    """
+    w_num = 1.0   # Largura N.º
     qtd_extras = len(colunas_extras)
+
     if qtd_extras > 0:
+        # Tamanho mínimo baseado no título do cabeçalho "Nome do Estudante" + margem
+        max_largura_nome = estimar_largura_texto_cm("Nome do Estudante", font_size_pt=12) + 0.7
+
+        # Encontra o maior nome entre os alunos desta turma específica
+        for num, aluno in alunos.items():
+            nome = aluno.get("nome", "")
+            if opcao_case == "upper":
+                nome = nome.upper()
+            elif opcao_case == "title":
+                nome = nome.title()
+
+            largura_nome = estimar_largura_texto_cm(nome, font_size_pt=12) + 0.7
+            if largura_nome > max_largura_nome:
+                max_largura_nome = largura_nome
+
+        w_nome = max_largura_nome
         espaco_restante = largura_total_cm - (w_num + w_nome)
-        w_col_extra = max(1.5, espaco_restante / qtd_extras)
+
+        # Garante que as colunas extras não fiquem excessivamente estreitas
+        min_w_extra = 1.2
+        if espaco_restante < (qtd_extras * min_w_extra):
+            w_nome = max(4.0, largura_total_cm - w_num - (qtd_extras * min_w_extra))
+            espaco_restante = largura_total_cm - (w_num + w_nome)
+
+        w_col_extra = espaco_restante / qtd_extras
         w_extras = [w_col_extra] * qtd_extras
     else:
         w_nome = largura_total_cm - w_num
@@ -379,7 +447,7 @@ def gerar_documento_word(
     log_callback=None,
     progress_callback=None,
 ):
-    """Gera o ficheiro Word mantendo a largura de coluna fixa e aplicando o estilo da caixa do nome."""
+    """Gera o documento Word ajustando dinamicamente a largura dos nomes de cada turma sem quebrar linha."""
     if colunas_extras is None:
         colunas_extras = []
 
@@ -396,7 +464,6 @@ def gerar_documento_word(
     primeira_turma = True
     num_cols = 2 + len(colunas_extras)
     titulos = ["N.º", "Nome do Estudante"] + colunas_extras
-    larguras = calcular_larguras_colunas(colunas_extras, largura_total_cm=18.0)
 
     if log_callback:
         log_callback("Gerando tabelas no Word...")
@@ -415,6 +482,11 @@ def gerar_documento_word(
         if not primeira_turma:
             doc.add_page_break()
         primeira_turma = False
+
+        # Calcula as larguras das colunas especificamente para esta turma
+        larguras = calcular_larguras_colunas_turma(
+            alunos, colunas_extras, opcao_case=opcao_case, largura_total_cm=18.0
+        )
 
         p_titulo = doc.add_paragraph()
         p_titulo.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -436,6 +508,7 @@ def gerar_documento_word(
         for i, titulo in enumerate(titulos):
             hdr_cells[i].width = larguras[i]
             aplicar_cor_fundo_celula(hdr_cells[i], "2F4F4F")
+            aplicar_no_wrap_celula(hdr_cells[i])
 
             p = hdr_cells[i].paragraphs[0]
             align = (
@@ -455,6 +528,9 @@ def gerar_documento_word(
         for num in sorted(alunos.keys()):
             aluno = alunos[num]
             row_cells = tabela.add_row().cells
+
+            # Aplica impedimento estrito de quebra de linha na célula do nome do estudante
+            aplicar_no_wrap_celula(row_cells[1])
 
             for i in range(num_cols):
                 row_cells[i].width = larguras[i]
@@ -582,7 +658,7 @@ class SideTabWizardApp:
             (2, "Arquivo Word"),
             (3, "Layout da Tabela"),
             (4, "Seleção de PDFs"),
-            (5, "Execução e Log"),
+            (5, "Execução"),
         ]
 
         self._configurar_estilos()
@@ -713,7 +789,7 @@ class SideTabWizardApp:
         ).pack(anchor=tk.W, pady=5)
         ttk.Radiobutton(
             f1_card,
-            text="Listar os números totais das turmas (Apenas leitura/Resumo)",
+            text="Listar os números totais das turmas",
             variable=self.opcao_modo,
             value="3",
             command=self._atualizar_resumo,
@@ -735,7 +811,7 @@ class SideTabWizardApp:
         self.lbl_word_selected = ttk.Label(f2_card, text="Nenhum arquivo selecionado.", wraplength=550)
         self.lbl_word_selected.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        ttk.Button(f2_card, text="Buscar Arquivo...", command=self._selecionar_word).pack(side=tk.RIGHT)
+        ttk.Button(f2_card, text="Salvar Arquivo...", command=self._selecionar_word).pack(side=tk.RIGHT)
 
         self._criar_bar_navegacao(
             f2,
@@ -765,7 +841,7 @@ class SideTabWizardApp:
         frame_btns_case = ttk.Frame(f3_case_card)
         frame_btns_case.pack(anchor=tk.W)
 
-        fonte_times_bold = ("Times New Roman", 12, "bold")
+        fonte_times_bold = ("Times New Roman", 12, "bold italic")
 
         self.btn_case_upper = tk.Button(
             frame_btns_case,
@@ -1056,7 +1132,7 @@ class SideTabWizardApp:
             caminho = filedialog.asksaveasfilename(
                 title="Onde deseja salvar o novo arquivo Word?",
                 defaultextension=".docx",
-                initialfile="Lista_de_Alunos.docx",
+                initialfile="Lista_de_Turmas.docx",
                 filetypes=[("Documento Word", "*.docx")],
             )
         else:
@@ -1107,7 +1183,7 @@ class SideTabWizardApp:
         elif modo == "2":
             self.sum_val_modo.config(text="Atualizar Existente")
         else:
-            self.sum_val_modo.config(text="Listar Totais das Turmas")
+            self.sum_val_modo.config(text="Listar Totais de Turmas")
 
         if modo == "3":
             self.sum_val_word.config(text="Não necessário")
@@ -1272,10 +1348,10 @@ class SideTabWizardApp:
             self.root.after(0, self._finalizar_execucao)
 
     def _exibir_janela_relatorio(self, dados_totais):
-        """Abre uma janela secundária exibindo os totais organizados por seções e agrupados por turno."""
+        """Abre uma janela secundária exibindo os totais organizados por seções e agrupados por turno em duas colunas (Manhã e Tarde)."""
         top = tk.Toplevel(self.root)
         top.title("Relatório de Totais das Turmas")
-        top.geometry("680x600")
+        top.geometry("720x620")
         top.transient(self.root)
         top.grab_set()
 
@@ -1285,7 +1361,7 @@ class SideTabWizardApp:
 
         btn_imprimir = ttk.Button(
             top_bar,
-            text="🖨️ Imprimir Relatório (A4)",
+            text="🖨️Imprimir",
             command=lambda: self._imprimir_relatorio_a4(dados_totais),
         )
         btn_imprimir.pack(side=tk.LEFT)
@@ -1369,7 +1445,7 @@ class SideTabWizardApp:
         criar_secao_cards(scroll_frame, "Total por Turno", dados_totais["por_turno"])
         criar_secao_cards(scroll_frame, "Total por Série", dados_totais["por_serie"])
 
-        # CARD: TOTAL POR TURMA (AGRUPADO POR TURNO: MANHÃ, TARDE, ETC.)
+        # CARD: TOTAL POR TURMA - EXIBIDO EM DUAS COLUNAS (MANHÃ E TARDE)
         card_turma = ttk.LabelFrame(scroll_frame, text=" Total por Turma ", padding="12")
         card_turma.pack(fill=tk.X, pady=(0, 10))
 
@@ -1382,37 +1458,88 @@ class SideTabWizardApp:
                 font=("TkDefaultFont", 9, "italic"),
             ).pack(anchor=tk.W)
         else:
-            row = 0
-            turnos_ordenados = sorted(por_turma_agrupado.keys(), key=ordenar_turnos)
-            for t_idx, turno in enumerate(turnos_ordenados):
-                turmas_dict = por_turma_agrupado[turno]
+            # Separar turnos entre Manhã, Tarde e Outros
+            dict_manha = {}
+            dict_tarde = {}
+            dict_outros = {}
 
-                if t_idx > 0:
-                    lbl_espaco = ttk.Label(card_turma, text="")
-                    lbl_espaco.grid(row=row, column=0, columnspan=2, pady=2)
-                    row += 1
+            for turno, turmas_dict in por_turma_agrupado.items():
+                t_upper = str(turno).upper()
+                if "MANH" in t_upper or "MATUTIN" in t_upper:
+                    dict_manha[turno] = turmas_dict
+                elif "TARD" in t_upper or "VESPERTIN" in t_upper:
+                    dict_tarde[turno] = turmas_dict
+                else:
+                    dict_outros[turno] = turmas_dict
 
-                lbl_header_turno = ttk.Label(
-                    card_turma,
-                    text=f"📌 Turno: {turno}",
+            # Container com duas colunas no layout Tkinter
+            container_colunas = ttk.Frame(card_turma)
+            container_colunas.pack(fill=tk.X, expand=True)
+
+            col_esquerda = ttk.Frame(container_colunas)
+            col_esquerda.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+
+            col_direita = ttk.Frame(container_colunas)
+            col_direita.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(10, 0))
+
+            def renderizar_bloco_turno(parent_frame, turno, turmas_dict):
+                lbl_header = ttk.Label(
+                    parent_frame,
+                    text=f"Turno: {turno}",
                     font=("TkDefaultFont", 10, "bold"),
                     foreground="#2F4F4F",
                 )
-                lbl_header_turno.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(4, 2))
-                row += 1
+                lbl_header.pack(anchor=tk.W, pady=(4, 2))
 
-                for turma_nome in sorted(turmas_dict.keys(), key=chave_ordenacao_natural):
+                grid_frame = ttk.Frame(parent_frame)
+                grid_frame.pack(fill=tk.X, anchor=tk.W, pady=(0, 6))
+
+                for r_idx, turma_nome in enumerate(sorted(turmas_dict.keys(), key=chave_ordenacao_natural)):
                     qtd = turmas_dict[turma_nome]
                     lbl_item = ttk.Label(
-                        card_turma, text=f"   • {turma_nome}:", font=("TkDefaultFont", 9)
+                        grid_frame, text=f"• {turma_nome}:", font=("TkDefaultFont", 9)
                     )
-                    lbl_item.grid(row=row, column=0, sticky=tk.W, padx=(10, 10), pady=1)
+                    lbl_item.grid(row=r_idx, column=0, sticky=tk.W, padx=(5, 10), pady=1)
 
                     lbl_val = ttk.Label(
-                        card_turma, text=f"{qtd} aluno(s)", font=("TkDefaultFont", 9, "bold")
+                        grid_frame, text=f"{qtd} aluno(s)", font=("TkDefaultFont", 9, "bold")
                     )
-                    lbl_val.grid(row=row, column=1, sticky=tk.W, pady=1)
-                    row += 1
+                    lbl_val.grid(row=r_idx, column=1, sticky=tk.W, pady=1)
+
+            # Coluna da Esquerda: Turmas da Manhã
+            if dict_manha:
+                for turno in sorted(dict_manha.keys(), key=ordenar_turnos):
+                    renderizar_bloco_turno(col_esquerda, turno, dict_manha[turno])
+            else:
+                lbl_vazio_m = ttk.Label(
+                    col_esquerda,
+                    text="Turno: Manhã\n(Nenhuma turma)",
+                    font=("TkDefaultFont", 9, "italic"),
+                    foreground="#777777",
+                )
+                lbl_vazio_m.pack(anchor=tk.W)
+
+            # Coluna da Direita: Turmas da Tarde
+            if dict_tarde:
+                for turno in sorted(dict_tarde.keys(), key=ordenar_turnos):
+                    renderizar_bloco_turno(col_direita, turno, dict_tarde[turno])
+            else:
+                lbl_vazio_t = ttk.Label(
+                    col_direita,
+                    text="Turno: Tarde\n(Nenhuma turma)",
+                    font=("TkDefaultFont", 9, "italic"),
+                    foreground="#777777",
+                )
+                lbl_vazio_t.pack(anchor=tk.W)
+
+            # Caso existam outros turnos (ex: Noite, Integral), exibe em bloco abaixo das 2 colunas
+            if dict_outros:
+                ttk.Separator(card_turma, orient="horizontal").pack(fill=tk.X, pady=8)
+                frame_outros = ttk.Frame(card_turma)
+                frame_outros.pack(fill=tk.X)
+
+                for turno in sorted(dict_outros.keys(), key=ordenar_turnos):
+                    renderizar_bloco_turno(frame_outros, turno, dict_outros[turno])
 
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
