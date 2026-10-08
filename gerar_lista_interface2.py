@@ -4,6 +4,7 @@ import threading
 import ctypes
 import tempfile
 import webbrowser
+from collections import Counter
 from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -135,7 +136,7 @@ def ordenar_turnos(turno_nome):
     return (4, t)
 
 def estimar_largura_texto_cm(texto, font_size_pt=12):
-    """Calcula uma estimativa da largura em cm de uma string no estilo Arial 12pt."""
+    """Calcula uma estimativa da largura em cm de uma string no estilo Arial."""
     if not texto:
         return 0.0
 
@@ -168,8 +169,26 @@ def estimar_largura_texto_cm(texto, font_size_pt=12):
     return largura_cm
 
 
+def detectar_estilo_case(turmas_dados):
+    """Detecta se os nomes nas turmas do Word estão em Title Case ('title') ou Maiúsculas ('upper')."""
+    total_nomes = 0
+    com_minusculas = 0
+
+    for alunos in turmas_dados.values():
+        for info in alunos.values():
+            nome = info.get("nome", "").strip()
+            if nome:
+                total_nomes += 1
+                if any(c.islower() for c in nome):
+                    com_minusculas += 1
+
+    if total_nomes > 0 and (com_minusculas / total_nomes) > 0.3:
+        return "title"
+    return "upper"
+
+
 def calcular_larguras_colunas_turma(
-    alunos, colunas_extras, opcao_case="upper", largura_total_cm=18.0
+    alunos, colunas_extras, opcao_case="upper", largura_total_cm=18.0, font_size_nome=12
 ):
     """
     Calcula as larguras das colunas para uma turma específica.
@@ -180,25 +199,25 @@ def calcular_larguras_colunas_turma(
     qtd_extras = len(colunas_extras)
 
     if qtd_extras > 0:
-        # Tamanho mínimo baseado no título do cabeçalho "Nome do Estudante" + margem
         max_largura_nome = estimar_largura_texto_cm("Nome do Estudante", font_size_pt=12) + 0.7
 
-        # Encontra o maior nome entre os alunos desta turma específica
         for num, aluno in alunos.items():
             nome = aluno.get("nome", "")
             if opcao_case == "upper":
                 nome = nome.upper()
             elif opcao_case == "title":
-                nome = nome.title()
+                if any(c.islower() for c in nome):
+                    pass
+                else:
+                    nome = nome.title()
 
-            largura_nome = estimar_largura_texto_cm(nome, font_size_pt=12) + 0.7
+            largura_nome = estimar_largura_texto_cm(nome, font_size_pt=font_size_nome) + 0.7
             if largura_nome > max_largura_nome:
                 max_largura_nome = largura_nome
 
         w_nome = max_largura_nome
         espaco_restante = largura_total_cm - (w_num + w_nome)
 
-        # Garante que as colunas extras não fiquem excessivamente estreitas
         min_w_extra = 1.2
         if espaco_restante < (qtd_extras * min_w_extra):
             w_nome = max(4.0, largura_total_cm - w_num - (qtd_extras * min_w_extra))
@@ -369,13 +388,14 @@ def calcular_totais_dados(dados_consolidados):
     }
 
 def ler_dados_word_existente(caminho_word):
-    """Lê um ficheiro Word existente, extrai os dados e detecta as colunas extras."""
+    """Lê um ficheiro Word existente, extrai os dados, colunas extras e o tamanho da fonte usada nos nomes."""
     if not os.path.exists(caminho_word):
-        return {}, []
+        return {}, [], 12
 
     doc = Document(caminho_word)
     turmas_existentes = {}
     colunas_extras = []
+    tamanhos_fonte_encontrados = []
 
     if doc.tables:
         primeira_tabela = doc.tables[0]
@@ -399,6 +419,12 @@ def ler_dados_word_existente(caminho_word):
                         continue
                     n_text = row.cells[0].text.strip()
                     nome_text = row.cells[1].text.strip()
+
+                    # Inspeciona a fonte do texto do nome do aluno
+                    if len(row.cells) > 1 and row.cells[1].paragraphs:
+                        for run in row.cells[1].paragraphs[0].runs:
+                            if run.font and run.font.size is not None:
+                                tamanhos_fonte_encontrados.append(run.font.size.pt)
 
                     situacao = "Matriculado"
 
@@ -437,13 +463,19 @@ def ler_dados_word_existente(caminho_word):
                         }
                 tabela_idx += 1
 
-    return turmas_existentes, colunas_extras
+    fonte_detectada = 12
+    if tamanhos_fonte_encontrados:
+        fonte_mais_comum = Counter(tamanhos_fonte_encontrados).most_common(1)[0][0]
+        fonte_detectada = int(round(fonte_mais_comum))
+
+    return turmas_existentes, colunas_extras, fonte_detectada
 
 def gerar_documento_word(
     turmas_dados,
     caminho_saida,
     colunas_extras=None,
     opcao_case="upper",
+    font_size_nome=12,
     log_callback=None,
     progress_callback=None,
 ):
@@ -483,9 +515,12 @@ def gerar_documento_word(
             doc.add_page_break()
         primeira_turma = False
 
-        # Calcula as larguras das colunas especificamente para esta turma
         larguras = calcular_larguras_colunas_turma(
-            alunos, colunas_extras, opcao_case=opcao_case, largura_total_cm=18.0
+            alunos,
+            colunas_extras,
+            opcao_case=opcao_case,
+            largura_total_cm=18.0,
+            font_size_nome=font_size_nome,
         )
 
         p_titulo = doc.add_paragraph()
@@ -529,7 +564,6 @@ def gerar_documento_word(
             aluno = alunos[num]
             row_cells = tabela.add_row().cells
 
-            # Aplica impedimento estrito de quebra de linha na célula do nome do estudante
             aplicar_no_wrap_celula(row_cells[1])
 
             for i in range(num_cols):
@@ -539,14 +573,15 @@ def gerar_documento_word(
             situacao_str = aluno["situacao"].capitalize()
             is_especial = situacao_str in ["Transferido", "Remanejado"]
 
-            # Formatação do nome
             nome_formatado = aluno["nome"]
             if opcao_case == "upper":
                 nome_formatado = nome_formatado.upper()
             elif opcao_case == "title":
-                nome_formatado = nome_formatado.title()
+                if any(c.islower() for c in nome_formatado):
+                    pass
+                else:
+                    nome_formatado = nome_formatado.title()
 
-            # Coluna 0: N.º
             formatar_paragrafo_celula(
                 row_cells[0].paragraphs[0],
                 str(num),
@@ -562,7 +597,7 @@ def gerar_documento_word(
                         nome_formatado,
                         WD_ALIGN_PARAGRAPH.LEFT,
                         bold=False,
-                        font_size=12,
+                        font_size=font_size_nome,
                     )
                     celula_mesclada_extras = row_cells[2].merge(row_cells[-1])
                     celula_mesclada_extras.width = sum(larguras[2:])
@@ -579,7 +614,7 @@ def gerar_documento_word(
                         nome_formatado,
                         WD_ALIGN_PARAGRAPH.LEFT,
                         bold=False,
-                        font_size=12,
+                        font_size=font_size_nome,
                     )
                     formatar_paragrafo_celula(
                         row_cells[2].paragraphs[0],
@@ -589,7 +624,6 @@ def gerar_documento_word(
                         font_size=12,
                     )
                 else:
-                    # Quando NÃO há colunas extras: o nome fica normal e o " - Transferido" / " - Remanejado" em NEGRITO
                     p_nome = row_cells[1].paragraphs[0]
                     p_nome.text = ""
                     p_nome.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -597,13 +631,11 @@ def gerar_documento_word(
                     p_nome.paragraph_format.space_after = Pt(2)
                     p_nome.paragraph_format.line_spacing = 1.0
 
-                    # Run 1: Nome do Aluno (Normal)
                     run_nome = p_nome.add_run(nome_formatado)
                     run_nome.font.name = "Arial"
-                    run_nome.font.size = Pt(12)
+                    run_nome.font.size = Pt(font_size_nome)
                     run_nome.bold = False
 
-                    # Run 2: " - Situacao" (Negrito)
                     run_status = p_nome.add_run(f" - {situacao_str}")
                     run_status.font.name = "Arial"
                     run_status.font.size = Pt(12)
@@ -617,7 +649,7 @@ def gerar_documento_word(
                     nome_formatado,
                     WD_ALIGN_PARAGRAPH.LEFT,
                     bold=False,
-                    font_size=12,
+                    font_size=font_size_nome,
                 )
 
                 for col_idx in range(len(colunas_extras)):
@@ -639,16 +671,20 @@ class SideTabWizardApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Gerador de Listas de Alunos")
+        self.root.protocol("WM_DELETE_WINDOW", self._ao_fechar)
 
         self._centralizar_janela(1150, 750)
         self.root.minsize(1000, 650)
 
         # Dados da Aplicação
-        self.opcao_modo = tk.StringVar(value="1") # '1' = Novo Word, '2' = Atualizar Word, '3' = Totais
-        self.opcao_case = tk.StringVar(value="upper")  # 'upper' para AA ou 'title' para Aa
+        self.opcao_modo = tk.StringVar(value="1")
+        self.opcao_case = tk.StringVar(value="upper")
+        self.fonte_nome_11 = tk.BooleanVar(value=False)
+        self.fonte_detectada_word = 12  # Armazena o tamanho da fonte ao atualizar Word existente
         self.caminho_word = ""
         self.colunas_extras = []
         self.caminhos_pdfs = []
+        self.arquivos_temporarios = []
 
         self.passo_atual = 1
         self.max_passo_alcancado = 1
@@ -666,6 +702,16 @@ class SideTabWizardApp:
         self._criar_passos_conteudo()
         self._exibir_passo(1)
         self._atualizar_resumo()
+
+    def _ao_fechar(self):
+        """Remove arquivos temporários criados ao fechar a aplicação."""
+        for caminho in self.arquivos_temporarios:
+            try:
+                if os.path.exists(caminho):
+                    os.remove(caminho)
+            except Exception:
+                pass
+        self.root.destroy()
 
     def _centralizar_janela(self, largura, altura):
         self.root.update_idletasks()
@@ -742,11 +788,11 @@ class SideTabWizardApp:
         self.sum_val_word = ttk.Label(self.summary_right, text="Não selecionado", style="SummaryVal.TLabel")
         self.sum_val_word.pack(anchor=tk.W, padx=10, pady=(0, 10))
 
-        ttk.Label(self.summary_right, text="Caixa dos Nomes:", style="SummaryLabel.TLabel").pack(anchor=tk.W, padx=10)
+        ttk.Label(self.summary_right, text="Estilo dos Nomes:", style="SummaryLabel.TLabel").pack(anchor=tk.W, padx=10)
         self.sum_val_case = ttk.Label(self.summary_right, text="TUDO MAIÚSCULO (AA)", style="SummaryVal.TLabel")
         self.sum_val_case.pack(anchor=tk.W, padx=10, pady=(0, 10))
 
-        ttk.Label(self.summary_right, text="Layout Tabela:", style="SummaryLabel.TLabel").pack(anchor=tk.W, padx=10)
+        ttk.Label(self.summary_right, text="Layout da Tabela:", style="SummaryLabel.TLabel").pack(anchor=tk.W, padx=10)
         self.sum_val_layout = ttk.Label(self.summary_right, text="-", style="SummaryVal.TLabel")
         self.sum_val_layout.pack(anchor=tk.W, padx=10, pady=(0, 10))
 
@@ -811,7 +857,7 @@ class SideTabWizardApp:
         self.lbl_word_selected = ttk.Label(f2_card, text="Nenhum arquivo selecionado.", wraplength=550)
         self.lbl_word_selected.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        ttk.Button(f2_card, text="Salvar Arquivo...", command=self._selecionar_word).pack(side=tk.RIGHT)
+        ttk.Button(f2_card, text="Abrir...", command=self._selecionar_word).pack(side=tk.RIGHT)
 
         self._criar_bar_navegacao(
             f2,
@@ -829,7 +875,6 @@ class SideTabWizardApp:
             style="SubHeader.TLabel",
         ).pack(anchor=tk.W, pady=(2, 15))
 
-        # CARD: Formatação dos Nomes (AA / Aa)
         f3_case_card = ttk.LabelFrame(f3, text=" Formatação dos Nomes dos Estudantes ", padding="12")
         f3_case_card.pack(fill=tk.X, pady=(0, 10))
 
@@ -847,7 +892,7 @@ class SideTabWizardApp:
             frame_btns_case,
             text="AA",
             font=fonte_times_bold,
-            width=5,
+            width=4,
             command=lambda: self._definir_opcao_case("upper"),
         )
         self.btn_case_upper.pack(side=tk.LEFT, padx=(0, 10))
@@ -856,14 +901,21 @@ class SideTabWizardApp:
             frame_btns_case,
             text="Aa",
             font=fonte_times_bold,
-            width=5,
+            width=4,
             command=lambda: self._definir_opcao_case("title"),
         )
         self.btn_case_title.pack(side=tk.LEFT)
 
+        self.chk_fonte_11 = ttk.Checkbutton(
+            f3_case_card,
+            text="Diminuir tamanho da fonte",
+            variable=self.fonte_nome_11,
+            command=self._atualizar_resumo,
+        )
+        self.chk_fonte_11.pack(anchor=tk.W, pady=(10, 0))
+
         self._atualizar_botoes_case()
 
-        # CARD: Colunas Extras
         f3_card = ttk.LabelFrame(f3, text=" Adicionar Nova Coluna ", padding="12")
         f3_card.pack(fill=tk.X, pady=(0, 10))
 
@@ -1144,6 +1196,15 @@ class SideTabWizardApp:
         if caminho:
             self.caminho_word = caminho
             self.lbl_word_selected.config(text=caminho)
+            if modo == "2":
+                try:
+                    dados_temp, _, fonte_det = ler_dados_word_existente(caminho)
+                    estilo = detectar_estilo_case(dados_temp)
+                    self.opcao_case.set(estilo)
+                    self.fonte_detectada_word = fonte_det
+                    self.fonte_nome_11.set(fonte_det == 11)
+                except Exception:
+                    pass
             self._atualizar_resumo()
 
     def _selecionar_pdfs(self):
@@ -1195,10 +1256,18 @@ class SideTabWizardApp:
             else:
                 self.sum_val_word.config(text="Não selecionado")
 
-            if self.opcao_case.get() == "upper":
-                self.sum_val_case.config(text="TUDO MAIÚSCULO (AA)")
+            txt_case = "TUDO MAIÚSCULO (AA)" if self.opcao_case.get() == "upper" else "Primeira Maiúscula (Aa)"
+            
+            if modo == "2":
+                tamanho_fonte_txt = f"{self.fonte_detectada_word}pt"
+                txt_case = f"Detectado: {txt_case} ({tamanho_fonte_txt})"
             else:
-                self.sum_val_case.config(text="Primeira Maiúscula (Aa)")
+                if self.fonte_nome_11.get():
+                    txt_case += " Fonte 11pt"
+                else:
+                    txt_case += ""
+
+            self.sum_val_case.config(text=txt_case)
 
             if modo == "2":
                 self.sum_val_layout.config(text="Extraído do Word existente")
@@ -1287,11 +1356,19 @@ class SideTabWizardApp:
             else:
                 inicio_pdf = 10 if modo == "2" else 0
                 fim_pdf = 70
+                font_size_final = 11 if self.fonte_nome_11.get() else 12
 
                 if modo == "2":
                     self._log("Lendo dados do arquivo Word existente...")
                     self._set_progresso(5)
-                    dados_consolidados, self.colunas_extras = ler_dados_word_existente(self.caminho_word)
+                    dados_consolidados, self.colunas_extras, font_size_detectada = ler_dados_word_existente(self.caminho_word)
+
+                    estilo_word = detectar_estilo_case(dados_consolidados)
+                    self.opcao_case.set(estilo_word)
+                    self.fonte_detectada_word = font_size_detectada
+                    font_size_final = font_size_detectada
+
+                    self.root.after(0, self._atualizar_resumo)
                     self._set_progresso(10)
 
                 total_pdfs = len(self.caminhos_pdfs)
@@ -1311,6 +1388,10 @@ class SideTabWizardApp:
                         if turma not in dados_consolidados:
                             dados_consolidados[turma] = {}
                         for num, info in alunos.items():
+                            if modo == "2" and num in dados_consolidados[turma]:
+                                nome_existente = dados_consolidados[turma][num].get("nome", "")
+                                if nome_existente:
+                                    info["nome"] = nome_existente
                             dados_consolidados[turma][num] = info
 
                 self._set_progresso(70)
@@ -1324,6 +1405,7 @@ class SideTabWizardApp:
                     self.caminho_word,
                     colunas_extras=self.colunas_extras,
                     opcao_case=self.opcao_case.get(),
+                    font_size_nome=font_size_final,
                     log_callback=self._log,
                     progress_callback=word_prog_cb,
                 )
@@ -1355,7 +1437,6 @@ class SideTabWizardApp:
         top.transient(self.root)
         top.grab_set()
 
-        # BARRA SUPERIOR COM BOTÃO DE IMPRESSÃO
         top_bar = ttk.Frame(top, padding="10")
         top_bar.pack(side=tk.TOP, fill=tk.X)
 
@@ -1368,7 +1449,6 @@ class SideTabWizardApp:
 
         ttk.Separator(top, orient="horizontal").pack(fill=tk.X, padx=10, pady=(0, 5))
 
-        # ÁREA DE SCROLL COM CANVAS E SCROLLBAR
         canvas = tk.Canvas(top, borderwidth=0, highlightthickness=0)
         scrollbar = ttk.Scrollbar(top, orient="vertical", command=canvas.yview)
         scroll_frame = ttk.Frame(canvas, padding="15")
@@ -1386,14 +1466,12 @@ class SideTabWizardApp:
         canvas.bind("<Configure>", _on_canvas_configure)
         canvas.configure(yscrollcommand=scrollbar.set)
 
-        # ROLAGEM COM O SCROLL DO MOUSE
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
         top.bind("<Destroy>", lambda e: top.unbind_all("<MouseWheel>"))
 
-        # CABEÇALHO DA JANELA
         lbl_titulo = ttk.Label(
             scroll_frame,
             text="Relatório de Totais de Alunos Matriculados",
@@ -1401,7 +1479,6 @@ class SideTabWizardApp:
         )
         lbl_titulo.pack(anchor=tk.W, pady=(0, 10))
 
-        # CARD: TOTAL GERAL
         card_geral = ttk.LabelFrame(scroll_frame, text=" Total Geral ", padding="12")
         card_geral.pack(fill=tk.X, pady=(0, 10))
 
@@ -1413,7 +1490,6 @@ class SideTabWizardApp:
         )
         lbl_total.pack(anchor=tk.W)
 
-        # FUNÇÃO AUXILIAR PARA CRIAR OS CARTÕES COM LABELS
         def criar_secao_cards(parent, titulo, dicionario):
             card = ttk.LabelFrame(parent, text=f" {titulo} ", padding="12")
             card.pack(fill=tk.X, pady=(0, 10))
@@ -1440,12 +1516,10 @@ class SideTabWizardApp:
                 lbl_val.grid(row=row, column=1, sticky=tk.W, pady=2)
                 row += 1
 
-        # SEÇÕES REGULARES
         criar_secao_cards(scroll_frame, "Total por Curso", dados_totais["por_curso"])
         criar_secao_cards(scroll_frame, "Total por Turno", dados_totais["por_turno"])
         criar_secao_cards(scroll_frame, "Total por Série", dados_totais["por_serie"])
 
-        # CARD: TOTAL POR TURMA - EXIBIDO EM DUAS COLUNAS (MANHÃ E TARDE)
         card_turma = ttk.LabelFrame(scroll_frame, text=" Total por Turma ", padding="12")
         card_turma.pack(fill=tk.X, pady=(0, 10))
 
@@ -1458,7 +1532,6 @@ class SideTabWizardApp:
                 font=("TkDefaultFont", 9, "italic"),
             ).pack(anchor=tk.W)
         else:
-            # Separar turnos entre Manhã, Tarde e Outros
             dict_manha = {}
             dict_tarde = {}
             dict_outros = {}
@@ -1472,7 +1545,6 @@ class SideTabWizardApp:
                 else:
                     dict_outros[turno] = turmas_dict
 
-            # Container com duas colunas no layout Tkinter
             container_colunas = ttk.Frame(card_turma)
             container_colunas.pack(fill=tk.X, expand=True)
 
@@ -1506,7 +1578,6 @@ class SideTabWizardApp:
                     )
                     lbl_val.grid(row=r_idx, column=1, sticky=tk.W, pady=1)
 
-            # Coluna da Esquerda: Turmas da Manhã
             if dict_manha:
                 for turno in sorted(dict_manha.keys(), key=ordenar_turnos):
                     renderizar_bloco_turno(col_esquerda, turno, dict_manha[turno])
@@ -1519,7 +1590,6 @@ class SideTabWizardApp:
                 )
                 lbl_vazio_m.pack(anchor=tk.W)
 
-            # Coluna da Direita: Turmas da Tarde
             if dict_tarde:
                 for turno in sorted(dict_tarde.keys(), key=ordenar_turnos):
                     renderizar_bloco_turno(col_direita, turno, dict_tarde[turno])
@@ -1532,7 +1602,6 @@ class SideTabWizardApp:
                 )
                 lbl_vazio_t.pack(anchor=tk.W)
 
-            # Caso existam outros turnos (ex: Noite, Integral), exibe em bloco abaixo das 2 colunas
             if dict_outros:
                 ttk.Separator(card_turma, orient="horizontal").pack(fill=tk.X, pady=8)
                 frame_outros = ttk.Frame(card_turma)
@@ -1598,7 +1667,7 @@ class SideTabWizardApp:
         }}
         body {{
             font-family: Arial, Helvetica, sans-serif;
-            color: #222;
+            color: black;
             margin: 0;
             padding: 0;
             font-size: 12pt;
@@ -1741,10 +1810,12 @@ class SideTabWizardApp:
             temp_dir = tempfile.gettempdir()
             caminho_html = os.path.join(temp_dir, "relatorio_totais_a4.html")
 
+            if caminho_html not in self.arquivos_temporarios:
+                self.arquivos_temporarios.append(caminho_html)
+
             with open(caminho_html, "w", encoding="utf-8") as f:
                 f.write(html_content)
 
-            # Solicita a escolha da impressora via janela de impressão do navegador
             messagebox.showinfo(
                 "Seleção de Impressora",
                 "O relatório será exibido no seu navegador para que você possa escolher em qual impressora imprimir.",
@@ -1763,6 +1834,8 @@ class SideTabWizardApp:
     def reiniciar(self):
         self.opcao_modo.set("1")
         self.opcao_case.set("upper")
+        self.fonte_nome_11.set(False)
+        self.fonte_detectada_word = 12
         self.caminho_word = ""
         self.colunas_extras = []
         self.caminhos_pdfs = []
